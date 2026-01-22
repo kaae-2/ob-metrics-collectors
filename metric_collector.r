@@ -1,7 +1,33 @@
 #!/usr/bin/env Rscript
 
+required_packages <- c(
+  "jsonlite",
+  "dplyr",
+  "tidyr",
+  "readr",
+  "ggplot2",
+  "stringr",
+  "rmarkdown",
+  "knitr",
+  "scales"
+)
+
+user_lib <- Sys.getenv("R_LIBS_USER")
+if (user_lib == "") {
+  user_lib <- file.path(Sys.getenv("HOME"), "R", "library")
+}
+if (!dir.exists(user_lib)) {
+  dir.create(user_lib, recursive = TRUE, showWarnings = FALSE)
+}
+.libPaths(unique(c(user_lib, .libPaths())))
+
+installed <- rownames(installed.packages())
+missing <- setdiff(required_packages, installed)
+if (length(missing) > 0) {
+  install.packages(missing, repos = "https://cloud.r-project.org", lib = user_lib)
+}
+
 suppressPackageStartupMessages({
-  library(argparse)
   library(jsonlite)
   library(dplyr)
   library(tidyr)
@@ -12,6 +38,69 @@ suppressPackageStartupMessages({
   library(knitr)
   library(scales)
 })
+
+parse_cli_args <- function() {
+  has_argparse <- requireNamespace("argparse", quietly = TRUE)
+  if (has_argparse) {
+    parser <- argparse::ArgumentParser(
+      description = "Collect and summarize Omnibenchmark metrics"
+    )
+    parser$add_argument(
+      "--metrics.scores",
+      dest = "metrics_scores",
+      type = "character",
+      nargs = "+",
+      required = TRUE,
+      help = "Metric score file(s) or directories to search"
+    )
+    parser$add_argument(
+      "--output_dir",
+      type = "character",
+      required = TRUE,
+      help = "Output directory"
+    )
+    parser$add_argument("--name", type = "character", required = TRUE)
+    return(parser$parse_args())
+  }
+
+  args <- commandArgs(trailingOnly = TRUE)
+  parsed <- list(metrics_scores = character(), output_dir = NULL, name = NULL)
+  i <- 1
+  while (i <= length(args)) {
+    key <- args[[i]]
+    if (startsWith(key, "--")) {
+      key <- sub("^--", "", key)
+      value <- NULL
+      if (grepl("=", key)) {
+        parts <- strsplit(key, "=", fixed = TRUE)[[1]]
+        key <- parts[[1]]
+        value <- parts[[2]]
+      } else if (i < length(args)) {
+        value <- args[[i + 1]]
+        i <- i + 1
+      }
+      if (key == "metrics.scores") {
+        parsed$metrics_scores <- c(parsed$metrics_scores, value)
+      } else if (key == "output_dir") {
+        parsed$output_dir <- value
+      } else if (key == "name") {
+        parsed$name <- value
+      }
+    }
+    i <- i + 1
+  }
+
+  if (length(parsed$metrics_scores) == 0) {
+    stop("--metrics.scores is required")
+  }
+  if (is.null(parsed$output_dir) || parsed$output_dir == "") {
+    stop("--output_dir is required")
+  }
+  if (is.null(parsed$name) || parsed$name == "") {
+    stop("--name is required")
+  }
+  parsed
+}
 
 `%||%` <- function(x, y) {
   if (is.null(x) || length(x) == 0) {
@@ -27,10 +116,6 @@ normalize_paths <- function(values) {
 expand_metric_inputs <- function(inputs) {
   paths <- c()
   for (entry in inputs) {
-    if (length(Sys.glob(entry)) > 0) {
-      paths <- c(paths, Sys.glob(entry))
-      next
-    }
     if (dir.exists(entry)) {
       candidates <- list.files(
         entry,
@@ -39,6 +124,10 @@ expand_metric_inputs <- function(inputs) {
         full.names = TRUE
       )
       paths <- c(paths, candidates)
+      next
+    }
+    if (length(Sys.glob(entry)) > 0) {
+      paths <- c(paths, Sys.glob(entry))
       next
     }
     if (file.exists(entry)) {
@@ -52,15 +141,15 @@ read_metrics_json <- function(path) {
   con <- gzfile(path, open = "rt")
   on.exit(close(con), add = TRUE)
   payload <- paste(readLines(con, warn = FALSE), collapse = "")
+  payload <- gsub("\\bNaN\\b", "null", payload)
+  payload <- gsub("\\bInfinity\\b", "null", payload)
+  payload <- gsub("\\b-Infinity\\b", "null", payload)
   jsonlite::fromJSON(payload, simplifyVector = FALSE)
 }
 
 extract_match <- function(path, pattern, default_value) {
   match <- str_match(path, pattern)
-  if (is.na(match[, 2])) {
-    return(default_value)
-  }
-  match[, 2]
+  ifelse(is.na(match[, 2]), default_value, match[, 2])
 }
 
 parse_lineage <- function(path, payload) {
@@ -189,6 +278,71 @@ plot_runtime_scatter <- function(df, value_col, output_path, title) {
 
 render_report <- function(output_dir, plot_paths, tables, name) {
   report_path <- file.path(output_dir, "metrics_report.Rmd")
+  output_html <- file.path(output_dir, "metrics_report.html")
+  if (!rmarkdown::pandoc_available()) {
+    macro_table <- readr::read_tsv(
+      file.path(output_dir, tables$macro_by_cv),
+      show_col_types = FALSE
+    )
+    weighted_table <- readr::read_tsv(
+      file.path(output_dir, tables$weighted_by_cv),
+      show_col_types = FALSE
+    )
+    summary_counts <- macro_table %>% summarize(
+      datasets = n_distinct(dataset),
+      models = n_distinct(model),
+      crossvalidations = n_distinct(crossvalidation)
+    )
+    outputs <- data.frame(
+      file = c(
+        tables$macro_by_cv,
+        tables$weighted_by_cv,
+        tables$macro_summary,
+        tables$weighted_summary,
+        tables$macro_scatter_table,
+        tables$weighted_scatter_table
+      )
+    )
+    html_lines <- c(
+      "<html>",
+      "<head><meta charset=\"utf-8\"></head>",
+      "<body>",
+      sprintf("<h1>Metrics Report - %s</h1>", name),
+      "<h2>Overview</h2>",
+      knitr::kable(summary_counts, format = "html"),
+      "<h2>Macro F1 By Crossvalidation</h2>",
+      knitr::kable(macro_table, format = "html"),
+      "<h2>Weighted F1 By Crossvalidation</h2>",
+      knitr::kable(weighted_table, format = "html"),
+      "<h2>Plots</h2>",
+      if (file.exists(file.path(output_dir, plot_paths$macro_boxplot))) {
+        sprintf("<img src=\"%s\" />", plot_paths$macro_boxplot)
+      } else {
+        ""
+      },
+      if (file.exists(file.path(output_dir, plot_paths$weighted_boxplot))) {
+        sprintf("<img src=\"%s\" />", plot_paths$weighted_boxplot)
+      } else {
+        ""
+      },
+      if (file.exists(file.path(output_dir, plot_paths$macro_scatter))) {
+        sprintf("<img src=\"%s\" />", plot_paths$macro_scatter)
+      } else {
+        ""
+      },
+      if (file.exists(file.path(output_dir, plot_paths$weighted_scatter))) {
+        sprintf("<img src=\"%s\" />", plot_paths$weighted_scatter)
+      } else {
+        ""
+      },
+      "<h2>Outputs</h2>",
+      knitr::kable(outputs, format = "html"),
+      "</body>",
+      "</html>"
+    )
+    writeLines(html_lines, output_html)
+    return(invisible())
+  }
   report_content <- c(
     "---",
     sprintf("title: \"Metrics Report - %s\"", name),
@@ -276,29 +430,12 @@ render_report <- function(output_dir, plot_paths, tables, name) {
   writeLines(report_content, report_path)
   rmarkdown::render(
     input = report_path,
-    output_file = file.path(output_dir, "metrics_report.html"),
+    output_file = output_html,
     quiet = TRUE
   )
 }
 
-parser <- ArgumentParser(description = "Collect and summarize Omnibenchmark metrics")
-parser$add_argument(
-  "--metrics.scores",
-  dest = "metrics_scores",
-  type = "character",
-  nargs = "+",
-  required = TRUE,
-  help = "Metric score file(s) or directories to search"
-)
-parser$add_argument(
-  "--output_dir",
-  type = "character",
-  required = TRUE,
-  help = "Output directory"
-)
-parser$add_argument("--name", type = "character", required = TRUE)
-
-args <- parser$parse_args()
+args <- parse_cli_args()
 
 input_paths <- expand_metric_inputs(unlist(args$metrics_scores))
 if (length(input_paths) == 0) {

@@ -1,0 +1,7 @@
+dataset	model	crossvalidation	n_samples	f1_macro_median	f1_weighted_median	runtime_seconds
+data_import	dgcytof	num-1	2670903.5	0.8466006386270548	0.916165890440672	NA
+data_import	dgcytof	num-1_test-sample-limit-5	1330435	0.8765210022000318	0.9417274531635089	NA
+data_import	dgcytof	num-2	2656540.5	0.8138055577210243	0.9193831874888777	NA
+data_import	dgcytof	num-3	2639813.5	0.7588675485545011	0.8063502786915049	NA
+data_import	dgcytof	num-4	2664631	0.8814492467034495	0.9445064255073479	NA
+data_import	dgcytof	num-5	2691784.5	0.8017238891626572	0.9142360647740276	NA

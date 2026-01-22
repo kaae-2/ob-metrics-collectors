@@ -1,0 +1,13 @@
+dataset	model	crossvalidation	run_id	f1_weighted	n_samples
+data_import	dgcytof	num-1	run0	0.946925198880546	1536957
+data_import	dgcytof	num-1	run0	0.885406582000798	3804850
+data_import	dgcytof	num-1_test-sample-limit-5	run0	0.9220987663181492	1536957
+data_import	dgcytof	num-1_test-sample-limit-5	run0	0.9613561400088686	1123913
+data_import	dgcytof	num-2	run0	0.92342852882465	1356644
+data_import	dgcytof	num-2	run0	0.9153378461531054	3956437
+data_import	dgcytof	num-3	run0	0.6937901466234003	1408466
+data_import	dgcytof	num-3	run0	0.9189104107596093	3871161
+data_import	dgcytof	num-4	run0	0.9228757844780008	1421911
+data_import	dgcytof	num-4	run0	0.9661370665366951	3907351
+data_import	dgcytof	num-5	run0	0.9070942202915798	1404771
+data_import	dgcytof	num-5	run0	0.9213779092564754	3978798
