@@ -122,33 +122,39 @@ sanitize_label <- function(value) {
 dataset_label_cache <- new.env(parent = emptyenv())
 
 dataset_label_from_path <- function(path) {
-  normalized <- str_replace_all(path, "\\\\", "/")
-  match <- str_match(normalized, "(.*/data/[^/]+/[^/]+)")
-  if (is.na(match[, 2])) {
+  if (length(path) == 0) {
     return(NULL)
   }
-  dataset_root <- match[, 2]
-  if (exists(dataset_root, envir = dataset_label_cache, inherits = FALSE)) {
-    return(get(dataset_root, envir = dataset_label_cache, inherits = FALSE))
-  }
-  parameters_path <- file.path(dataset_root, "parameters.json")
-  if (!file.exists(parameters_path)) {
-    assign(dataset_root, basename(dataset_root), envir = dataset_label_cache)
-    return(basename(dataset_root))
-  }
-  parameters <- jsonlite::fromJSON(parameters_path)
-  if (length(parameters) == 0) {
-    assign(dataset_root, basename(dataset_root), envir = dataset_label_cache)
-    return(basename(dataset_root))
-  }
-  keys <- sort(names(parameters))
-  parts <- vapply(keys, function(key) {
-    value <- parameters[[key]]
-    sprintf("%s-%s", sanitize_label(key), sanitize_label(value))
+  labels <- vapply(path, function(item) {
+    normalized <- str_replace_all(item, "\\\\", "/")
+    match <- str_match(normalized, "(.*/data/[^/]+/[^/]+)")
+    if (is.na(match[, 2])) {
+      return(NA_character_)
+    }
+    dataset_root <- match[, 2]
+    if (exists(dataset_root, envir = dataset_label_cache, inherits = FALSE)) {
+      return(get(dataset_root, envir = dataset_label_cache, inherits = FALSE))
+    }
+    parameters_path <- file.path(dataset_root, "parameters.json")
+    if (!file.exists(parameters_path)) {
+      assign(dataset_root, basename(dataset_root), envir = dataset_label_cache)
+      return(basename(dataset_root))
+    }
+    parameters <- jsonlite::fromJSON(parameters_path)
+    if (length(parameters) == 0) {
+      assign(dataset_root, basename(dataset_root), envir = dataset_label_cache)
+      return(basename(dataset_root))
+    }
+    keys <- sort(names(parameters))
+    parts <- vapply(keys, function(key) {
+      value <- parameters[[key]]
+      sprintf("%s-%s", sanitize_label(key), sanitize_label(value))
+    }, character(1))
+    label <- paste(parts, collapse = "_")
+    assign(dataset_root, label, envir = dataset_label_cache)
+    label
   }, character(1))
-  label <- paste(parts, collapse = "_")
-  assign(dataset_root, label, envir = dataset_label_cache)
-  label
+  labels
 }
 
 expand_metric_inputs <- function(inputs) {
@@ -291,13 +297,20 @@ parse_performance <- function(path) {
         "/preprocessing/[^/]+/([^/]+)/",
         "unknown_crossvalidation"
       ),
-      dataset = dataset_label_from_path(normalized_path) %||% str_match(
-        params %||% "",
-        "dataset_name\\\"\\s*:\\s*\\\"([^\\\"]+)\\\""
-      )[, 2],
+      dataset = dataset_label_from_path(normalized_path),
       runtime_seconds = as.numeric(.data[["s"]] %||% NA_real_)
     ) %>%
-    mutate(dataset = ifelse(is.na(dataset), "unknown_dataset", dataset))
+    mutate(
+      dataset = ifelse(
+        is.na(dataset),
+        str_match(
+          params %||% "",
+          "dataset_name\\\"\\s*:\\s*\\\"([^\\\"]+)\\\""
+        )[, 2],
+        dataset
+      ),
+      dataset = ifelse(is.na(dataset), "unknown_dataset", dataset)
+    )
   perf
 }
 
