@@ -113,6 +113,44 @@ normalize_paths <- function(values) {
   unique(values[!is.na(values) & values != ""])
 }
 
+sanitize_label <- function(value) {
+  cleaned <- str_replace_all(as.character(value), "[^A-Za-z0-9._-]+", "-")
+  cleaned <- str_replace_all(cleaned, "-+", "-")
+  str_replace_all(cleaned, "^-|-$", "")
+}
+
+dataset_label_cache <- new.env(parent = emptyenv())
+
+dataset_label_from_path <- function(path) {
+  normalized <- str_replace_all(path, "\\\\", "/")
+  match <- str_match(normalized, "(.*/data/[^/]+/[^/]+)")
+  if (is.na(match[, 2])) {
+    return(NULL)
+  }
+  dataset_root <- match[, 2]
+  if (exists(dataset_root, envir = dataset_label_cache, inherits = FALSE)) {
+    return(get(dataset_root, envir = dataset_label_cache, inherits = FALSE))
+  }
+  parameters_path <- file.path(dataset_root, "parameters.json")
+  if (!file.exists(parameters_path)) {
+    assign(dataset_root, basename(dataset_root), envir = dataset_label_cache)
+    return(basename(dataset_root))
+  }
+  parameters <- jsonlite::fromJSON(parameters_path)
+  if (length(parameters) == 0) {
+    assign(dataset_root, basename(dataset_root), envir = dataset_label_cache)
+    return(basename(dataset_root))
+  }
+  keys <- sort(names(parameters))
+  parts <- vapply(keys, function(key) {
+    value <- parameters[[key]]
+    sprintf("%s-%s", sanitize_label(key), sanitize_label(value))
+  }, character(1))
+  label <- paste(parts, collapse = "_")
+  assign(dataset_root, label, envir = dataset_label_cache)
+  label
+}
+
 expand_metric_inputs <- function(inputs) {
   paths <- c()
   for (entry in inputs) {
@@ -154,7 +192,12 @@ extract_match <- function(path, pattern, default_value) {
 
 parse_lineage <- function(path, payload) {
   normalized <- str_replace_all(path, "\\\\", "/")
-  dataset <- str_replace(basename(normalized), "\\.flow_metrics\\.json\\.gz$", "")
+  dataset_label <- dataset_label_from_path(normalized)
+  dataset <- dataset_label %||% str_replace(
+    basename(normalized),
+    "\\.flow_metrics\\.json\\.gz$",
+    ""
+  )
   dataset <- ifelse(dataset == "", payload$name %||% "unknown_dataset", dataset)
   model <- extract_match(normalized, "/analysis/([^/]+)/", "unknown_model")
   crossvalidation <- extract_match(
@@ -248,7 +291,7 @@ parse_performance <- function(path) {
         "/preprocessing/[^/]+/([^/]+)/",
         "unknown_crossvalidation"
       ),
-      dataset = str_match(
+      dataset = dataset_label_from_path(normalized_path) %||% str_match(
         params %||% "",
         "dataset_name\\\"\\s*:\\s*\\\"([^\\\"]+)\\\""
       )[, 2],
