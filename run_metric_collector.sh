@@ -12,7 +12,7 @@ metrics_input="${script_dir}/../out"
 output_dir="${script_dir}/out/data/metric_collectors/default"
 name="metrics_report"
 
-Rscript "${script_dir}/metric_collector.r" \
+Rscript "${script_dir}/metric_collector.R" \
   --metrics.scores "${metrics_input}" \
   --output_dir "${output_dir}" \
   --name "${name}"
