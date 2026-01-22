@@ -437,12 +437,18 @@ render_report <- function(output_dir, plot_paths, tables, name) {
 
 args <- parse_cli_args()
 
+args$output_dir <- normalizePath(args$output_dir, winslash = "/", mustWork = FALSE)
+if (!dir.exists(args$output_dir)) {
+  dir.create(args$output_dir, recursive = TRUE, showWarnings = FALSE)
+}
+if (!dir.exists(args$output_dir)) {
+  stop(sprintf("Output directory could not be created: %s", args$output_dir))
+}
+
 input_paths <- expand_metric_inputs(unlist(args$metrics_scores))
 if (length(input_paths) == 0) {
   stop("No metrics files found for --metrics.scores")
 }
-
-dir.create(args$output_dir, recursive = TRUE, showWarnings = FALSE)
 
 metrics_rows <- lapply(input_paths, collect_metrics)
 metrics_df <- bind_rows(metrics_rows)
