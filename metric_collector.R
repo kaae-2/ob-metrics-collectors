@@ -369,12 +369,20 @@ plot_boxplot <- function(df, value_col, output_path, title) {
 }
 
 parse_performance <- function(path) {
+  empty_performance <- function() {
+    tibble::tibble(
+      dataset = character(),
+      model = character(),
+      crossvalidation = character(),
+      runtime_seconds = numeric()
+    )
+  }
   if (!file.exists(path)) {
-    return(tibble())
+    return(empty_performance())
   }
   perf <- readr::read_tsv(path, show_col_types = FALSE, progress = FALSE)
   if (!"module" %in% names(perf) || !"path" %in% names(perf)) {
-    return(tibble())
+    return(empty_performance())
   }
   perf <- perf %>%
     filter(module == "flow_metrics") %>%
@@ -421,7 +429,7 @@ plot_runtime_scatter <- function(df, value_col, output_path, title) {
   ggsave(output_path, plot, width = 10, height = 6, dpi = 150)
 }
 
-render_report <- function(output_dir, plot_paths, tables, name) {
+render_report <- function(output_dir, plot_paths, tables, name, performance_note = NULL) {
   report_path <- file.path(output_dir, "metrics_report.Rmd")
   output_html <- file.path(output_dir, "metrics_report.html")
   if (!rmarkdown::pandoc_available()) {
@@ -460,6 +468,11 @@ render_report <- function(output_dir, plot_paths, tables, name) {
       "<h2>Weighted F1 By Crossvalidation</h2>",
       knitr::kable(weighted_table, format = "html"),
       "<h2>Plots</h2>",
+      if (!is.null(performance_note) && performance_note != "") {
+        sprintf("<p><em>Note: %s</em></p>", performance_note)
+      } else {
+        ""
+      },
       if (file.exists(file.path(output_dir, plot_paths$macro_boxplot))) {
         sprintf("<img src=\"%s\" />", plot_paths$macro_boxplot)
       } else {
@@ -487,6 +500,11 @@ render_report <- function(output_dir, plot_paths, tables, name) {
     )
     writeLines(html_lines, output_html)
     return(invisible())
+  }
+  note_lines <- if (!is.null(performance_note) && performance_note != "") {
+    c(sprintf("Note: %s", performance_note), "")
+  } else {
+    character(0)
   }
   report_content <- c(
     "---",
@@ -531,6 +549,7 @@ render_report <- function(output_dir, plot_paths, tables, name) {
     "",
     "## Plots",
     "",
+    note_lines,
     "```{r}",
     sprintf("knitr::include_graphics('%s')", plot_paths$macro_boxplot),
     "```",
@@ -722,7 +741,18 @@ perf_path <- file.path(getwd(), "out", "performances.tsv")
 if (!file.exists(perf_path)) {
   perf_path <- file.path(args$output_dir, "performances.tsv")
 }
+performance_available <- file.exists(perf_path)
+performance_note <- NULL
+if (!performance_available) {
+  performance_note <- "Runtime scatter plots skipped because performances.tsv was not found."
+}
 performance <- parse_performance(perf_path)
+if (performance_available && nrow(performance) == 0) {
+  performance_available <- FALSE
+  if (is.null(performance_note)) {
+    performance_note <- "Runtime scatter plots skipped because performances.tsv has no flow_metrics entries."
+  }
+}
 
 scatter_table <- metrics_df %>%
   group_by(dataset, model, crossvalidation) %>%
@@ -733,16 +763,20 @@ scatter_table <- metrics_df %>%
     .groups = "drop"
   )
 
-scatter_joined <- scatter_table %>%
-  left_join(
-    performance %>% select(dataset, model, crossvalidation, runtime_seconds),
-    by = c("dataset", "model", "crossvalidation")
-  )
+if (performance_available) {
+  scatter_joined <- scatter_table %>%
+    left_join(
+      performance %>% select(dataset, model, crossvalidation, runtime_seconds),
+      by = c("dataset", "model", "crossvalidation")
+    )
+} else {
+  scatter_joined <- scatter_table %>% mutate(runtime_seconds = NA_real_)
+}
 
 macro_scatter_path <- file.path(plot_dir, "samples_vs_f1_macro.png")
 weighted_scatter_path <- file.path(plot_dir, "samples_vs_f1_weighted.png")
 
-if (nrow(scatter_joined) > 0) {
+if (performance_available && nrow(scatter_joined) > 0) {
   plot_runtime_scatter(
     scatter_joined,
     "f1_macro_median",
@@ -778,7 +812,7 @@ table_paths <- list(
   weighted_scatter_table = basename(weighted_scatter_table_path)
 )
 
-render_report(args$output_dir, plot_paths, table_paths, args$name)
+render_report(args$output_dir, plot_paths, table_paths, args$name, performance_note)
 
 plot_files <- list.files(plot_dir, pattern = "\\.png$", full.names = FALSE)
 if (length(plot_files) > 0) {
