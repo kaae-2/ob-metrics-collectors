@@ -54,6 +54,14 @@ parse_cli_args <- function() {
       help = "Metric score file(s) or directories to search"
     )
     parser$add_argument(
+      "--data.order",
+      dest = "data_order",
+      type = "character",
+      nargs = "+",
+      required = TRUE,
+      help = "Order JSON file(s) from data_import"
+    )
+    parser$add_argument(
       "--output_dir",
       type = "character",
       required = TRUE,
@@ -64,7 +72,12 @@ parse_cli_args <- function() {
   }
 
   args <- commandArgs(trailingOnly = TRUE)
-  parsed <- list(metrics_scores = character(), output_dir = NULL, name = NULL)
+  parsed <- list(
+    metrics_scores = character(),
+    data_order = character(),
+    output_dir = NULL,
+    name = NULL
+  )
   i <- 1
   while (i <= length(args)) {
     key <- args[[i]]
@@ -81,6 +94,8 @@ parse_cli_args <- function() {
       }
       if (key == "metrics.scores") {
         parsed$metrics_scores <- c(parsed$metrics_scores, value)
+      } else if (key == "data.order") {
+        parsed$data_order <- c(parsed$data_order, value)
       } else if (key == "output_dir") {
         parsed$output_dir <- value
       } else if (key == "name") {
@@ -92,6 +107,9 @@ parse_cli_args <- function() {
 
   if (length(parsed$metrics_scores) == 0) {
     stop("--metrics.scores is required")
+  }
+  if (length(parsed$data_order) == 0) {
+    stop("--data.order is required")
   }
   if (is.null(parsed$output_dir) || parsed$output_dir == "") {
     stop("--output_dir is required")
@@ -155,6 +173,77 @@ dataset_label_from_path <- function(path) {
     label
   }, character(1))
   labels
+}
+
+dataset_root_from_path <- function(path) {
+  normalized <- str_replace_all(path, "\\\\", "/")
+  match <- str_match(normalized, "(.*/data/[^/]+/[^/]+)")
+  ifelse(is.na(match[, 2]), NA_character_, match[, 2])
+}
+
+read_order_sample_count <- function(path) {
+  if (!file.exists(path)) {
+    stop(sprintf("Order file not found: %s", path))
+  }
+  con <- gzfile(path, open = "rt")
+  on.exit(close(con), add = TRUE)
+  payload <- paste(readLines(con, warn = FALSE), collapse = "")
+  data <- jsonlite::fromJSON(payload)
+  if (!is.list(data) || is.null(data$order)) {
+    stop(sprintf("Order JSON missing 'order' key: %s", path))
+  }
+  order <- data$order
+  if (!is.vector(order) || length(order) == 0) {
+    stop(sprintf("Order JSON must contain a non-empty list: %s", path))
+  }
+  length(order)
+}
+
+build_order_map <- function(paths) {
+  labels <- dataset_label_from_path(paths)
+  mapping <- list()
+  for (idx in seq_along(paths)) {
+    path <- paths[[idx]]
+    dataset <- labels[[idx]]
+    if (is.na(dataset) || dataset == "") {
+      dataset <- basename(dirname(path))
+    }
+    sample_count <- read_order_sample_count(path)
+    existing <- mapping[[dataset]] %||% NA_integer_
+    if (!is.na(existing) && existing != sample_count) {
+      stop(
+        sprintf(
+          "Conflicting sample counts for dataset '%s' (got %s and %s).",
+          dataset,
+          existing,
+          sample_count
+        )
+      )
+    }
+    mapping[[dataset]] <- sample_count
+  }
+  mapping
+}
+
+read_preprocessing_num <- function(dataset_root, crossvalidation) {
+  if (is.na(dataset_root) || dataset_root == "") {
+    return(NA_integer_)
+  }
+  params_path <- file.path(
+    dataset_root,
+    "preprocessing",
+    "data_preprocessing",
+    crossvalidation,
+    "parameters.json"
+  )
+  if (!file.exists(params_path)) {
+    return(NA_integer_)
+  }
+  params <- jsonlite::fromJSON(params_path)
+  if (!is.list(params) || is.null(params$num)) {
+    return(NA_integer_)
+  }
+  as.integer(params$num)
 }
 
 expand_metric_inputs <- function(inputs) {
@@ -506,11 +595,83 @@ if (length(input_paths) == 0) {
   stop("No metrics files found for --metrics.scores")
 }
 
+order_paths <- normalize_paths(unlist(args$data_order))
+if (length(order_paths) == 0) {
+  stop("No order files found for --data.order")
+}
+missing_order_paths <- order_paths[!file.exists(order_paths)]
+if (length(missing_order_paths) > 0) {
+  stop(
+    sprintf(
+      "Order files missing: %s",
+      paste(missing_order_paths, collapse = ", ")
+    )
+  )
+}
+order_map <- build_order_map(order_paths)
+
 metrics_rows <- lapply(input_paths, collect_metrics)
 metrics_df <- bind_rows(metrics_rows)
 if (nrow(metrics_df) == 0) {
   stop("No metrics rows parsed from inputs")
 }
+
+missing_datasets <- setdiff(unique(metrics_df$dataset), names(order_map))
+if (length(missing_datasets) > 0) {
+  stop(
+    sprintf(
+      "Missing order data for datasets: %s",
+      paste(missing_datasets, collapse = ", ")
+    )
+  )
+}
+
+metrics_df <- metrics_df %>%
+  mutate(
+    dataset_root = dataset_root_from_path(source_path),
+    preprocessing_num = vapply(
+      seq_len(n()),
+      function(idx) {
+        read_preprocessing_num(dataset_root[[idx]], crossvalidation[[idx]])
+      },
+      integer(1)
+    ),
+    sample_count = vapply(
+      dataset,
+      function(item) {
+        if (is.na(item) || item == "") {
+          return(NA_integer_)
+        }
+        count <- order_map[[item]]
+        if (is.null(count)) {
+          return(NA_integer_)
+        }
+        count
+      },
+      integer(1)
+    ),
+    effective_crossvalidation = ifelse(
+      !is.na(preprocessing_num) & !is.na(sample_count),
+      sprintf("num-%d", ((preprocessing_num - 1) %% sample_count) + 1),
+      crossvalidation
+    )
+  )
+
+deduped_metrics <- metrics_df %>%
+  distinct(dataset, model, run_id, effective_crossvalidation, .keep_all = TRUE)
+if (nrow(deduped_metrics) < nrow(metrics_df)) {
+  warning(
+    sprintf(
+      "Filtered %d duplicate metric rows after crossvalidation wrap.",
+      nrow(metrics_df) - nrow(deduped_metrics)
+    ),
+    call. = FALSE
+  )
+}
+
+metrics_df <- deduped_metrics %>%
+  mutate(crossvalidation = effective_crossvalidation) %>%
+  select(-effective_crossvalidation, -dataset_root, -preprocessing_num, -sample_count)
 
 macro_table <- metrics_df %>%
   select(dataset, model, crossvalidation, run_id, f1_macro, n_samples) %>%
