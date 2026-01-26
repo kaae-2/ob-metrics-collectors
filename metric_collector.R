@@ -375,17 +375,39 @@ collect_metrics <- function(path) {
 }
 
 collect_per_population <- function(path) {
+  empty_per_population <- function() {
+    tibble(
+      dataset = character(),
+      model = character(),
+      crossvalidation = character(),
+      run_id = character(),
+      population_id = character(),
+      population_name = character(),
+      population = character(),
+      f1 = numeric(),
+      precision = numeric(),
+      recall = numeric(),
+      accuracy = numeric(),
+      tp = numeric(),
+      fp = numeric(),
+      fn = numeric(),
+      tn = numeric(),
+      scaling_rate = numeric(),
+      support = numeric(),
+      source_path = character()
+    )
+  }
   payload <- read_metrics_json(path)
   results <- payload$results
   if (is.null(results) || length(results) == 0) {
-    return(tibble())
+    return(empty_per_population())
   }
   lineage <- parse_lineage(path, payload)
   rows <- lapply(names(results), function(run_id) {
     run <- results[[run_id]]
     per_population <- run$per_population
     if (is.null(per_population) || length(per_population) == 0) {
-      return(NULL)
+      return(empty_per_population())
     }
     pop_rows <- lapply(names(per_population), function(pop_id) {
       entry <- per_population[[pop_id]]
