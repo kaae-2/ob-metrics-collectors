@@ -322,8 +322,16 @@ compute_weighted_f1 <- function(per_population) {
   list(weighted_f1 = weighted, total_n = total_n)
 }
 
-extract_population_label <- function(entry) {
-  candidates <- c(entry$population, entry$label, entry$name, entry$id, entry$class)
+extract_population_label <- function(entry, population_id = NA_character_) {
+  candidates <- c(
+    entry$population_name,
+    entry$population,
+    entry$label,
+    entry$name,
+    entry$id,
+    entry$class,
+    population_id
+  )
   candidates <- candidates[!is.na(candidates) & candidates != ""]
   if (length(candidates) == 0) {
     return("unknown_population")
@@ -348,6 +356,16 @@ collect_metrics <- function(path) {
       crossvalidation = lineage$crossvalidation,
       run_id = run_id,
       f1_macro = as.numeric(run$f1_macro %||% NA_real_),
+      precision_macro = as.numeric(run$precision_macro %||% NA_real_),
+      recall_macro = as.numeric(run$recall_macro %||% NA_real_),
+      accuracy = as.numeric(run$accuracy %||% NA_real_),
+      mcc = as.numeric(run$mcc %||% NA_real_),
+      pop_freq_corr = as.numeric(run$pop_freq_corr %||% NA_real_),
+      overlap = as.numeric(run$overlap %||% NA_real_),
+      runtime_seconds = as.numeric(run$runtime_seconds %||% NA_real_),
+      scalability_seconds_per_item = as.numeric(
+        run$scalability_seconds_per_item %||% NA_real_
+      ),
       f1_weighted = as.numeric(weighted$weighted_f1),
       n_samples = as.numeric(n_samples),
       source_path = path
@@ -369,7 +387,8 @@ collect_per_population <- function(path) {
     if (is.null(per_population) || length(per_population) == 0) {
       return(NULL)
     }
-    pop_rows <- lapply(per_population, function(entry) {
+    pop_rows <- lapply(names(per_population), function(pop_id) {
+      entry <- per_population[[pop_id]]
       f1 <- as.numeric(entry$f1 %||% NA_real_)
       n_val <- entry$n %||% entry$support %||% NA_real_
       tibble(
@@ -377,9 +396,19 @@ collect_per_population <- function(path) {
         model = lineage$model,
         crossvalidation = lineage$crossvalidation,
         run_id = run_id,
-        population = extract_population_label(entry),
+        population_id = as.character(pop_id),
+        population_name = as.character(entry$population_name %||% NA_character_),
+        population = extract_population_label(entry, pop_id),
         f1 = f1,
-        n = as.numeric(n_val),
+        precision = as.numeric(entry$precision %||% NA_real_),
+        recall = as.numeric(entry$recall %||% NA_real_),
+        accuracy = as.numeric(entry$accuracy %||% NA_real_),
+        tp = as.numeric(entry$tp %||% NA_real_),
+        fp = as.numeric(entry$fp %||% NA_real_),
+        fn = as.numeric(entry$fn %||% NA_real_),
+        tn = as.numeric(entry$tn %||% NA_real_),
+        scaling_rate = as.numeric(entry$scaling_rate %||% NA_real_),
+        support = as.numeric(n_val),
         source_path = path
       )
     })
@@ -396,17 +425,52 @@ write_table <- function(df, path) {
   readr::write_tsv(df, path)
 }
 
-plot_boxplot <- function(df, value_col, output_path, title) {
+plot_boxplot <- function(
+  df,
+  value_col,
+  output_path,
+  title,
+  x_col = "model",
+  facet_col = "dataset"
+) {
   if (nrow(df) == 0) {
     return(invisible())
   }
-  plot <- ggplot(df, aes(x = model, y = .data[[value_col]])) +
+  plot <- ggplot(df, aes(x = .data[[x_col]], y = .data[[value_col]])) +
     geom_boxplot(outlier.alpha = 0.4) +
     geom_jitter(width = 0.15, alpha = 0.35, size = 1.5) +
-    facet_wrap(~dataset, scales = "free_x") +
-    labs(title = title, x = "Model", y = value_col) +
+    labs(title = title, x = x_col, y = value_col) +
     theme_minimal(base_size = 12)
+  if (!is.null(facet_col) && facet_col != "") {
+    plot <- plot + facet_wrap(as.formula(paste("~", facet_col)), scales = "free_x")
+  }
   ggsave(output_path, plot, width = 10, height = 6, dpi = 150)
+}
+
+compute_support_entropy <- function(supports) {
+  values <- supports[!is.na(supports) & supports > 0]
+  total <- sum(values)
+  if (length(values) == 0 || total == 0) {
+    return(NA_real_)
+  }
+  probs <- values / total
+  -sum(probs * log2(probs))
+}
+
+bucket_support_fraction <- function(fraction) {
+  if (is.na(fraction)) {
+    return(NA_character_)
+  }
+  if (fraction < 0.01) {
+    return("<1%")
+  }
+  if (fraction < 0.05) {
+    return("1-5%")
+  }
+  if (fraction < 0.2) {
+    return("5-20%")
+  }
+  ">20%"
 }
 
 parse_performance <- function(path) {
@@ -470,6 +534,27 @@ plot_runtime_scatter <- function(df, value_col, output_path, title) {
   ggsave(output_path, plot, width = 10, height = 6, dpi = 150)
 }
 
+plot_simple_scatter <- function(
+  df,
+  x_col,
+  y_col,
+  output_path,
+  title,
+  facet_col = NULL
+) {
+  if (nrow(df) == 0) {
+    return(invisible())
+  }
+  plot <- ggplot(df, aes(x = .data[[x_col]], y = .data[[y_col]])) +
+    geom_point(alpha = 0.6) +
+    labs(title = title, x = x_col, y = y_col) +
+    theme_minimal(base_size = 12)
+  if (!is.null(facet_col) && facet_col != "") {
+    plot <- plot + facet_wrap(as.formula(paste("~", facet_col)), scales = "free")
+  }
+  ggsave(output_path, plot, width = 10, height = 6, dpi = 150)
+}
+
 render_report <- function(output_dir, plot_paths, tables, name, performance_note = NULL) {
   report_path <- file.path(output_dir, "metrics_report.Rmd")
   output_html <- file.path(output_dir, "metrics_report.html")
@@ -480,6 +565,38 @@ render_report <- function(output_dir, plot_paths, tables, name, performance_note
     )
     population_table <- readr::read_tsv(
       file.path(output_dir, tables$weighted_by_cv),
+      show_col_types = FALSE
+    )
+    run_metrics_table <- readr::read_tsv(
+      file.path(output_dir, tables$run_metrics),
+      show_col_types = FALSE
+    )
+    per_population_summary_table <- readr::read_tsv(
+      file.path(output_dir, tables$per_population_summary),
+      show_col_types = FALSE
+    )
+    per_population_stability_table <- readr::read_tsv(
+      file.path(output_dir, tables$per_population_stability),
+      show_col_types = FALSE
+    )
+    per_population_confusion_table <- readr::read_tsv(
+      file.path(output_dir, tables$per_population_confusion),
+      show_col_types = FALSE
+    )
+    rare_population_table <- readr::read_tsv(
+      file.path(output_dir, tables$rare_population),
+      show_col_types = FALSE
+    )
+    dataset_context_table <- readr::read_tsv(
+      file.path(output_dir, tables$dataset_context),
+      show_col_types = FALSE
+    )
+    dominant_fnr_table <- readr::read_tsv(
+      file.path(output_dir, tables$dominant_fnr),
+      show_col_types = FALSE
+    )
+    dominant_fpr_table <- readr::read_tsv(
+      file.path(output_dir, tables$dominant_fpr),
       show_col_types = FALSE
     )
     summary_counts <- macro_table %>% summarize(
@@ -493,6 +610,14 @@ render_report <- function(output_dir, plot_paths, tables, name, performance_note
         tables$weighted_by_cv,
         tables$macro_summary,
         tables$weighted_summary,
+        tables$run_metrics,
+        tables$per_population_summary,
+        tables$per_population_stability,
+        tables$per_population_confusion,
+        tables$rare_population,
+        tables$dataset_context,
+        tables$dominant_fnr,
+        tables$dominant_fpr,
         tables$macro_scatter_table,
         tables$weighted_scatter_table
       )
@@ -506,8 +631,24 @@ render_report <- function(output_dir, plot_paths, tables, name, performance_note
       knitr::kable(summary_counts, format = "html"),
       "<h2>Macro F1 By Crossvalidation</h2>",
       knitr::kable(macro_table, format = "html"),
-      "<h2>Per-population F1 By Crossvalidation</h2>",
+      "<h2>Per-population Metrics By Crossvalidation</h2>",
       knitr::kable(population_table, format = "html"),
+      "<h2>Run-level Metrics</h2>",
+      knitr::kable(run_metrics_table, format = "html"),
+      "<h2>Per-population Summary</h2>",
+      knitr::kable(per_population_summary_table, format = "html"),
+      "<h2>Per-population Stability</h2>",
+      knitr::kable(per_population_stability_table, format = "html"),
+      "<h2>Per-population Confusion Stats</h2>",
+      knitr::kable(per_population_confusion_table, format = "html"),
+      "<h2>Rare Population Buckets</h2>",
+      knitr::kable(rare_population_table, format = "html"),
+      "<h2>Dataset Context</h2>",
+      knitr::kable(dataset_context_table, format = "html"),
+      "<h2>Dominant Errors (FNR)</h2>",
+      knitr::kable(dominant_fnr_table, format = "html"),
+      "<h2>Dominant Errors (FPR)</h2>",
+      knitr::kable(dominant_fpr_table, format = "html"),
       "<h2>Plots</h2>",
       if (!is.null(performance_note) && performance_note != "") {
         sprintf("<p><em>Note: %s</em></p>", performance_note)
@@ -524,6 +665,11 @@ render_report <- function(output_dir, plot_paths, tables, name, performance_note
       } else {
         ""
       },
+      if (file.exists(file.path(output_dir, plot_paths$macro_dataset_boxplot))) {
+        sprintf("<img src=\"%s\" />", plot_paths$macro_dataset_boxplot)
+      } else {
+        ""
+      },
       if (file.exists(file.path(output_dir, plot_paths$macro_scatter))) {
         sprintf("<img src=\"%s\" />", plot_paths$macro_scatter)
       } else {
@@ -531,6 +677,16 @@ render_report <- function(output_dir, plot_paths, tables, name, performance_note
       },
       if (file.exists(file.path(output_dir, plot_paths$weighted_scatter))) {
         sprintf("<img src=\"%s\" />", plot_paths$weighted_scatter)
+      } else {
+        ""
+      },
+      if (file.exists(file.path(output_dir, plot_paths$runtime_scatter))) {
+        sprintf("<img src=\"%s\" />", plot_paths$runtime_scatter)
+      } else {
+        ""
+      },
+      if (file.exists(file.path(output_dir, plot_paths$pop_freq_corr_scatter))) {
+        sprintf("<img src=\"%s\" />", plot_paths$pop_freq_corr_scatter)
       } else {
         ""
       },
@@ -568,6 +724,29 @@ render_report <- function(output_dir, plot_paths, tables, name, performance_note
     "```{r}",
     sprintf("macro_table <- read_tsv('%s')", tables$macro_by_cv),
     sprintf("population_table <- read_tsv('%s')", tables$weighted_by_cv),
+    sprintf("run_metrics_table <- read_tsv('%s')", tables$run_metrics),
+    sprintf(
+      "per_population_summary_table <- read_tsv('%s')",
+      tables$per_population_summary
+    ),
+    sprintf(
+      "per_population_stability_table <- read_tsv('%s')",
+      tables$per_population_stability
+    ),
+    sprintf(
+      "per_population_confusion_table <- read_tsv('%s')",
+      tables$per_population_confusion
+    ),
+    sprintf(
+      "rare_population_table <- read_tsv('%s')",
+      tables$rare_population
+    ),
+    sprintf(
+      "dataset_context_table <- read_tsv('%s')",
+      tables$dataset_context
+    ),
+    sprintf("dominant_fnr_table <- read_tsv('%s')", tables$dominant_fnr),
+    sprintf("dominant_fpr_table <- read_tsv('%s')", tables$dominant_fpr),
     "summary_counts <- macro_table %>% summarize(",
     "  datasets = n_distinct(dataset),",
     "  models = n_distinct(model),",
@@ -582,10 +761,58 @@ render_report <- function(output_dir, plot_paths, tables, name, performance_note
     "kable(macro_table)",
     "```",
     "",
-    "## Per-population F1 By Crossvalidation",
+    "## Per-population Metrics By Crossvalidation",
     "",
     "```{r}",
     "kable(population_table)",
+    "```",
+    "",
+    "## Run-level Metrics",
+    "",
+    "```{r}",
+    "kable(run_metrics_table)",
+    "```",
+    "",
+    "## Per-population Summary",
+    "",
+    "```{r}",
+    "kable(per_population_summary_table)",
+    "```",
+    "",
+    "## Per-population Stability",
+    "",
+    "```{r}",
+    "kable(per_population_stability_table)",
+    "```",
+    "",
+    "## Per-population Confusion Stats",
+    "",
+    "```{r}",
+    "kable(per_population_confusion_table)",
+    "```",
+    "",
+    "## Rare Population Buckets",
+    "",
+    "```{r}",
+    "kable(rare_population_table)",
+    "```",
+    "",
+    "## Dataset Context",
+    "",
+    "```{r}",
+    "kable(dataset_context_table)",
+    "```",
+    "",
+    "## Dominant Errors (FNR)",
+    "",
+    "```{r}",
+    "kable(dominant_fnr_table)",
+    "```",
+    "",
+    "## Dominant Errors (FPR)",
+    "",
+    "```{r}",
+    "kable(dominant_fpr_table)",
     "```",
     "",
     "## Plots",
@@ -597,6 +824,14 @@ render_report <- function(output_dir, plot_paths, tables, name, performance_note
     "",
     "```{r}",
     sprintf("knitr::include_graphics('%s')", plot_paths$weighted_boxplot),
+    "```",
+    "",
+    "```{r}",
+    sprintf(
+      "if (file.exists('%s')) knitr::include_graphics('%s')",
+      plot_paths$macro_dataset_boxplot,
+      plot_paths$macro_dataset_boxplot
+    ),
     "```",
     "",
     "```{r}",
@@ -615,6 +850,22 @@ render_report <- function(output_dir, plot_paths, tables, name, performance_note
     ),
     "```",
     "",
+    "```{r}",
+    sprintf(
+      "if (file.exists('%s')) knitr::include_graphics('%s')",
+      plot_paths$runtime_scatter,
+      plot_paths$runtime_scatter
+    ),
+    "```",
+    "",
+    "```{r}",
+    sprintf(
+      "if (file.exists('%s')) knitr::include_graphics('%s')",
+      plot_paths$pop_freq_corr_scatter,
+      plot_paths$pop_freq_corr_scatter
+    ),
+    "```",
+    "",
     "## Outputs",
     "",
     "```{r}",
@@ -624,6 +875,14 @@ render_report <- function(output_dir, plot_paths, tables, name, performance_note
     sprintf("    '%s',", tables$weighted_by_cv),
     sprintf("    '%s',", tables$macro_summary),
     sprintf("    '%s',", tables$weighted_summary),
+    sprintf("    '%s',", tables$run_metrics),
+    sprintf("    '%s',", tables$per_population_summary),
+    sprintf("    '%s',", tables$per_population_stability),
+    sprintf("    '%s',", tables$per_population_confusion),
+    sprintf("    '%s',", tables$rare_population),
+    sprintf("    '%s',", tables$dataset_context),
+    sprintf("    '%s',", tables$dominant_fnr),
+    sprintf("    '%s',", tables$dominant_fpr),
     sprintf("    '%s',", tables$macro_scatter_table),
     sprintf("    '%s'", tables$weighted_scatter_table),
     "  )",
@@ -772,19 +1031,195 @@ per_population_df <- per_population_df %>%
     model,
     run_id,
     effective_crossvalidation,
-    population,
+    population_id,
     .keep_all = TRUE
   ) %>%
   mutate(crossvalidation = effective_crossvalidation) %>%
   select(-effective_crossvalidation, -dataset_root, -preprocessing_num, -sample_count)
+
+per_population_df <- per_population_df %>%
+  left_join(
+    metrics_df %>%
+      select(
+        dataset,
+        model,
+        crossvalidation,
+        run_id,
+        n_samples,
+        f1_macro,
+        precision_macro,
+        recall_macro,
+        accuracy,
+        mcc,
+        pop_freq_corr,
+        overlap,
+        runtime_seconds,
+        scalability_seconds_per_item
+      ),
+    by = c("dataset", "model", "crossvalidation", "run_id")
+  )
 
 macro_table <- metrics_df %>%
   select(dataset, model, crossvalidation, run_id, f1_macro, n_samples) %>%
   arrange(dataset, model, crossvalidation, run_id)
 
 per_population_table <- per_population_df %>%
-  select(dataset, model, crossvalidation, run_id, population, f1, n) %>%
+  mutate(support_fraction = ifelse(n_samples > 0, support / n_samples, NA_real_)) %>%
+  select(
+    dataset,
+    model,
+    crossvalidation,
+    run_id,
+    population_id,
+    population_name,
+    population,
+    f1,
+    precision,
+    recall,
+    accuracy,
+    support,
+    n_samples,
+    support_fraction,
+    tp,
+    fp,
+    fn,
+    tn
+  ) %>%
   arrange(dataset, model, crossvalidation, run_id, population)
+
+run_metrics_table <- metrics_df %>%
+  mutate(
+    throughput_events_per_sec = ifelse(
+      runtime_seconds > 0,
+      n_samples / runtime_seconds,
+      NA_real_
+    )
+  ) %>%
+  select(
+    dataset,
+    model,
+    crossvalidation,
+    run_id,
+    n_samples,
+    f1_macro,
+    precision_macro,
+    recall_macro,
+    accuracy,
+    mcc,
+    pop_freq_corr,
+    overlap,
+    runtime_seconds,
+    scalability_seconds_per_item,
+    throughput_events_per_sec
+  ) %>%
+  arrange(dataset, model, crossvalidation, run_id)
+
+per_population_summary <- per_population_df %>%
+  group_by(dataset, model, population_id, population_name, population) %>%
+  summarize(
+    median_f1 = median(f1, na.rm = TRUE),
+    mean_f1 = mean(f1, na.rm = TRUE),
+    median_precision = median(precision, na.rm = TRUE),
+    median_recall = median(recall, na.rm = TRUE),
+    median_support = median(support, na.rm = TRUE),
+    n_runs = n(),
+    .groups = "drop"
+  )
+
+per_population_stability <- per_population_df %>%
+  group_by(dataset, model, population_id, population_name, population) %>%
+  summarize(
+    f1_mean = mean(f1, na.rm = TRUE),
+    f1_sd = sd(f1, na.rm = TRUE),
+    precision_sd = sd(precision, na.rm = TRUE),
+    recall_sd = sd(recall, na.rm = TRUE),
+    n_runs = n(),
+    .groups = "drop"
+  )
+
+per_population_confusion <- per_population_df %>%
+  mutate(
+    tpr = ifelse((tp + fn) > 0, tp / (tp + fn), NA_real_),
+    fpr = ifelse((fp + tn) > 0, fp / (fp + tn), NA_real_),
+    fnr = ifelse((fn + tp) > 0, fn / (fn + tp), NA_real_),
+    tnr = ifelse((tn + fp) > 0, tn / (tn + fp), NA_real_)
+  ) %>%
+  select(
+    dataset,
+    model,
+    crossvalidation,
+    run_id,
+    population_id,
+    population_name,
+    population,
+    tp,
+    fp,
+    fn,
+    tn,
+    tpr,
+    fpr,
+    fnr,
+    tnr
+  ) %>%
+  arrange(dataset, model, crossvalidation, run_id, population)
+
+rare_population_table <- per_population_df %>%
+  mutate(support_fraction = ifelse(n_samples > 0, support / n_samples, NA_real_)) %>%
+  mutate(rare_bucket = vapply(support_fraction, bucket_support_fraction, character(1))) %>%
+  group_by(dataset, model, crossvalidation, run_id, rare_bucket) %>%
+  summarize(
+    n_populations = n(),
+    median_f1 = median(f1, na.rm = TRUE),
+    median_precision = median(precision, na.rm = TRUE),
+    median_recall = median(recall, na.rm = TRUE),
+    total_support = sum(support, na.rm = TRUE),
+    n_samples = ifelse(
+      all(is.na(n_samples)),
+      NA_real_,
+      max(n_samples, na.rm = TRUE)
+    ),
+    support_share = ifelse(
+      !all(is.na(n_samples)) && max(n_samples, na.rm = TRUE) > 0,
+      sum(support, na.rm = TRUE) / max(n_samples, na.rm = TRUE),
+      NA_real_
+    ),
+    .groups = "drop"
+  )
+
+dataset_context_table <- per_population_df %>%
+  group_by(dataset, model, crossvalidation, run_id) %>%
+  summarize(
+    n_samples = ifelse(
+      all(is.na(n_samples)),
+      NA_real_,
+      max(n_samples, na.rm = TRUE)
+    ),
+    n_populations = n_distinct(population),
+    min_support = ifelse(all(is.na(support)), NA_real_, min(support, na.rm = TRUE)),
+    median_support = ifelse(
+      all(is.na(support)),
+      NA_real_,
+      median(support, na.rm = TRUE)
+    ),
+    max_support = ifelse(all(is.na(support)), NA_real_, max(support, na.rm = TRUE)),
+    imbalance_ratio = ifelse(
+      !all(is.na(support)) && min(support, na.rm = TRUE) > 0,
+      max(support, na.rm = TRUE) / min(support, na.rm = TRUE),
+      NA_real_
+    ),
+    support_entropy = compute_support_entropy(support),
+    .groups = "drop"
+  )
+
+dominant_fnr_table <- per_population_confusion %>%
+  group_by(dataset, model, crossvalidation, run_id) %>%
+  slice_max(order_by = fnr, n = 5, with_ties = FALSE) %>%
+  ungroup()
+
+dominant_fpr_table <- per_population_confusion %>%
+  group_by(dataset, model, crossvalidation, run_id) %>%
+  slice_max(order_by = fpr, n = 5, with_ties = FALSE) %>%
+  ungroup()
 
 macro_summary <- metrics_df %>%
   group_by(model) %>%
@@ -808,20 +1243,81 @@ macro_table_path <- file.path(args$output_dir, "f1_macro_by_crossvalidation.tsv"
 weighted_table_path <- file.path(args$output_dir, "f1_weighted_by_crossvalidation.tsv")
 macro_summary_path <- file.path(args$output_dir, "f1_macro_summary_by_model.tsv")
 weighted_summary_path <- file.path(args$output_dir, "f1_weighted_summary_by_model.tsv")
+run_metrics_path <- file.path(args$output_dir, "run_metrics.tsv")
+per_population_summary_path <- file.path(
+  args$output_dir,
+  "per_population_summary.tsv"
+)
+per_population_stability_path <- file.path(
+  args$output_dir,
+  "per_population_stability.tsv"
+)
+per_population_confusion_path <- file.path(
+  args$output_dir,
+  "per_population_confusion.tsv"
+)
+rare_population_path <- file.path(args$output_dir, "rare_population_buckets.tsv")
+dataset_context_path <- file.path(args$output_dir, "dataset_context.tsv")
+dominant_fnr_path <- file.path(args$output_dir, "dominant_errors_fnr.tsv")
+dominant_fpr_path <- file.path(args$output_dir, "dominant_errors_fpr.tsv")
 
 write_table(macro_table, macro_table_path)
 write_table(per_population_table, weighted_table_path)
 write_table(macro_summary, macro_summary_path)
 write_table(weighted_summary, weighted_summary_path)
+write_table(run_metrics_table, run_metrics_path)
+write_table(per_population_summary, per_population_summary_path)
+write_table(per_population_stability, per_population_stability_path)
+write_table(per_population_confusion, per_population_confusion_path)
+write_table(rare_population_table, rare_population_path)
+write_table(dataset_context_table, dataset_context_path)
+write_table(dominant_fnr_table, dominant_fnr_path)
+write_table(dominant_fpr_table, dominant_fpr_path)
 
 plot_dir <- file.path(args$output_dir, "plots")
 dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
 
 macro_boxplot_path <- file.path(plot_dir, "f1_macro_boxplot.png")
 weighted_boxplot_path <- file.path(plot_dir, "f1_weighted_boxplot.png")
+macro_dataset_boxplot_path <- file.path(
+  plot_dir,
+  "f1_macro_by_dataset_boxplot.png"
+)
+runtime_scatter_path <- file.path(plot_dir, "samples_vs_runtime.png")
+pop_freq_corr_scatter_path <- file.path(plot_dir, "pop_freq_corr_vs_f1_macro.png")
 
 plot_boxplot(metrics_df, "f1_macro", macro_boxplot_path, "Macro F1 by Model")
 plot_boxplot(metrics_df, "f1_weighted", weighted_boxplot_path, "Weighted F1 by Model")
+plot_boxplot(
+  metrics_df,
+  "f1_macro",
+  macro_dataset_boxplot_path,
+  "Macro F1 by Dataset",
+  x_col = "dataset",
+  facet_col = "model"
+)
+
+runtime_scatter_df <- run_metrics_table %>%
+  filter(!is.na(runtime_seconds) & !is.na(n_samples))
+plot_simple_scatter(
+  runtime_scatter_df,
+  "n_samples",
+  "runtime_seconds",
+  runtime_scatter_path,
+  "Runtime vs Sample Size",
+  facet_col = "dataset"
+)
+
+pop_freq_df <- run_metrics_table %>%
+  filter(!is.na(pop_freq_corr) & !is.na(f1_macro))
+plot_simple_scatter(
+  pop_freq_df,
+  "pop_freq_corr",
+  "f1_macro",
+  pop_freq_corr_scatter_path,
+  "Population Frequency Correlation vs Macro F1",
+  facet_col = "dataset"
+)
 
 perf_path <- file.path(getwd(), "out", "performances.tsv")
 if (!file.exists(perf_path)) {
@@ -885,8 +1381,17 @@ write_table(scatter_joined, weighted_scatter_table_path)
 plot_paths <- list(
   macro_boxplot = file.path("plots", basename(macro_boxplot_path)),
   weighted_boxplot = file.path("plots", basename(weighted_boxplot_path)),
+  macro_dataset_boxplot = file.path(
+    "plots",
+    basename(macro_dataset_boxplot_path)
+  ),
   macro_scatter = file.path("plots", basename(macro_scatter_path)),
-  weighted_scatter = file.path("plots", basename(weighted_scatter_path))
+  weighted_scatter = file.path("plots", basename(weighted_scatter_path)),
+  runtime_scatter = file.path("plots", basename(runtime_scatter_path)),
+  pop_freq_corr_scatter = file.path(
+    "plots",
+    basename(pop_freq_corr_scatter_path)
+  )
 )
 
 table_paths <- list(
@@ -894,6 +1399,14 @@ table_paths <- list(
   weighted_by_cv = basename(weighted_table_path),
   macro_summary = basename(macro_summary_path),
   weighted_summary = basename(weighted_summary_path),
+  run_metrics = basename(run_metrics_path),
+  per_population_summary = basename(per_population_summary_path),
+  per_population_stability = basename(per_population_stability_path),
+  per_population_confusion = basename(per_population_confusion_path),
+  rare_population = basename(rare_population_path),
+  dataset_context = basename(dataset_context_path),
+  dominant_fnr = basename(dominant_fnr_path),
+  dominant_fpr = basename(dominant_fpr_path),
   macro_scatter_table = basename(macro_scatter_table_path),
   weighted_scatter_table = basename(weighted_scatter_table_path)
 )
