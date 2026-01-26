@@ -127,6 +127,15 @@ parse_cli_args <- function() {
   x
 }
 
+ensure_columns <- function(df, defaults) {
+  for (name in names(defaults)) {
+    if (!name %in% names(df)) {
+      df[[name]] <- defaults[[name]]
+    }
+  }
+  df
+}
+
 normalize_paths <- function(values) {
   unique(values[!is.na(values) & values != ""])
 }
@@ -954,7 +963,38 @@ order_map <- build_order_map(order_paths)
 metrics_rows <- lapply(input_paths, collect_metrics)
 per_population_rows <- lapply(input_paths, collect_per_population)
 metrics_df <- bind_rows(metrics_rows)
+metrics_df <- ensure_columns(
+  metrics_df,
+  list(
+    precision_macro = NA_real_,
+    recall_macro = NA_real_,
+    accuracy = NA_real_,
+    mcc = NA_real_,
+    pop_freq_corr = NA_real_,
+    overlap = NA_real_,
+    runtime_seconds = NA_real_,
+    scalability_seconds_per_item = NA_real_
+  )
+)
 per_population_df <- bind_rows(per_population_rows)
+per_population_df <- ensure_columns(
+  per_population_df,
+  list(
+    population_id = NA_character_,
+    population_name = NA_character_,
+    population = NA_character_,
+    f1 = NA_real_,
+    precision = NA_real_,
+    recall = NA_real_,
+    accuracy = NA_real_,
+    tp = NA_real_,
+    fp = NA_real_,
+    fn = NA_real_,
+    tn = NA_real_,
+    scaling_rate = NA_real_,
+    support = NA_real_
+  )
+)
 if (nrow(metrics_df) == 0) {
   stop("No metrics rows parsed from inputs")
 }
