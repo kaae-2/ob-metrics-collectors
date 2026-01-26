@@ -322,6 +322,15 @@ compute_weighted_f1 <- function(per_population) {
   list(weighted_f1 = weighted, total_n = total_n)
 }
 
+extract_population_label <- function(entry) {
+  candidates <- c(entry$population, entry$label, entry$name, entry$id, entry$class)
+  candidates <- candidates[!is.na(candidates) & candidates != ""]
+  if (length(candidates) == 0) {
+    return("unknown_population")
+  }
+  as.character(candidates[[1]])
+}
+
 collect_metrics <- function(path) {
   payload <- read_metrics_json(path)
   results <- payload$results
@@ -343,6 +352,38 @@ collect_metrics <- function(path) {
       n_samples = as.numeric(n_samples),
       source_path = path
     )
+  })
+  bind_rows(rows)
+}
+
+collect_per_population <- function(path) {
+  payload <- read_metrics_json(path)
+  results <- payload$results
+  if (is.null(results) || length(results) == 0) {
+    return(tibble())
+  }
+  lineage <- parse_lineage(path, payload)
+  rows <- lapply(names(results), function(run_id) {
+    run <- results[[run_id]]
+    per_population <- run$per_population
+    if (is.null(per_population) || length(per_population) == 0) {
+      return(NULL)
+    }
+    pop_rows <- lapply(per_population, function(entry) {
+      f1 <- as.numeric(entry$f1 %||% NA_real_)
+      n_val <- entry$n %||% entry$support %||% NA_real_
+      tibble(
+        dataset = lineage$dataset,
+        model = lineage$model,
+        crossvalidation = lineage$crossvalidation,
+        run_id = run_id,
+        population = extract_population_label(entry),
+        f1 = f1,
+        n = as.numeric(n_val),
+        source_path = path
+      )
+    })
+    bind_rows(pop_rows)
   })
   bind_rows(rows)
 }
@@ -437,7 +478,7 @@ render_report <- function(output_dir, plot_paths, tables, name, performance_note
       file.path(output_dir, tables$macro_by_cv),
       show_col_types = FALSE
     )
-    weighted_table <- readr::read_tsv(
+    population_table <- readr::read_tsv(
       file.path(output_dir, tables$weighted_by_cv),
       show_col_types = FALSE
     )
@@ -465,8 +506,8 @@ render_report <- function(output_dir, plot_paths, tables, name, performance_note
       knitr::kable(summary_counts, format = "html"),
       "<h2>Macro F1 By Crossvalidation</h2>",
       knitr::kable(macro_table, format = "html"),
-      "<h2>Weighted F1 By Crossvalidation</h2>",
-      knitr::kable(weighted_table, format = "html"),
+      "<h2>Per-population F1 By Crossvalidation</h2>",
+      knitr::kable(population_table, format = "html"),
       "<h2>Plots</h2>",
       if (!is.null(performance_note) && performance_note != "") {
         sprintf("<p><em>Note: %s</em></p>", performance_note)
@@ -526,7 +567,7 @@ render_report <- function(output_dir, plot_paths, tables, name, performance_note
     "",
     "```{r}",
     sprintf("macro_table <- read_tsv('%s')", tables$macro_by_cv),
-    sprintf("weighted_table <- read_tsv('%s')", tables$weighted_by_cv),
+    sprintf("population_table <- read_tsv('%s')", tables$weighted_by_cv),
     "summary_counts <- macro_table %>% summarize(",
     "  datasets = n_distinct(dataset),",
     "  models = n_distinct(model),",
@@ -541,10 +582,10 @@ render_report <- function(output_dir, plot_paths, tables, name, performance_note
     "kable(macro_table)",
     "```",
     "",
-    "## Weighted F1 By Crossvalidation",
+    "## Per-population F1 By Crossvalidation",
     "",
     "```{r}",
-    "kable(weighted_table)",
+    "kable(population_table)",
     "```",
     "",
     "## Plots",
@@ -630,7 +671,9 @@ if (length(missing_order_paths) > 0) {
 order_map <- build_order_map(order_paths)
 
 metrics_rows <- lapply(input_paths, collect_metrics)
+per_population_rows <- lapply(input_paths, collect_per_population)
 metrics_df <- bind_rows(metrics_rows)
+per_population_df <- bind_rows(per_population_rows)
 if (nrow(metrics_df) == 0) {
   stop("No metrics rows parsed from inputs")
 }
@@ -646,6 +689,37 @@ if (length(missing_datasets) > 0) {
 }
 
 metrics_df <- metrics_df %>%
+  mutate(
+    dataset_root = dataset_root_from_path(source_path),
+    preprocessing_num = vapply(
+      seq_len(n()),
+      function(idx) {
+        read_preprocessing_num(dataset_root[[idx]], crossvalidation[[idx]])
+      },
+      integer(1)
+    ),
+    sample_count = vapply(
+      dataset,
+      function(item) {
+        if (is.na(item) || item == "") {
+          return(NA_integer_)
+        }
+        count <- order_map[[item]]
+        if (is.null(count)) {
+          return(NA_integer_)
+        }
+        count
+      },
+      integer(1)
+    ),
+    effective_crossvalidation = ifelse(
+      !is.na(preprocessing_num) & !is.na(sample_count),
+      sprintf("num-%d", ((preprocessing_num - 1) %% sample_count) + 1),
+      crossvalidation
+    )
+  )
+
+per_population_df <- per_population_df %>%
   mutate(
     dataset_root = dataset_root_from_path(source_path),
     preprocessing_num = vapply(
@@ -692,13 +766,25 @@ metrics_df <- deduped_metrics %>%
   mutate(crossvalidation = effective_crossvalidation) %>%
   select(-effective_crossvalidation, -dataset_root, -preprocessing_num, -sample_count)
 
+per_population_df <- per_population_df %>%
+  distinct(
+    dataset,
+    model,
+    run_id,
+    effective_crossvalidation,
+    population,
+    .keep_all = TRUE
+  ) %>%
+  mutate(crossvalidation = effective_crossvalidation) %>%
+  select(-effective_crossvalidation, -dataset_root, -preprocessing_num, -sample_count)
+
 macro_table <- metrics_df %>%
   select(dataset, model, crossvalidation, run_id, f1_macro, n_samples) %>%
   arrange(dataset, model, crossvalidation, run_id)
 
-weighted_table <- metrics_df %>%
-  select(dataset, model, crossvalidation, run_id, f1_weighted, n_samples) %>%
-  arrange(dataset, model, crossvalidation, run_id)
+per_population_table <- per_population_df %>%
+  select(dataset, model, crossvalidation, run_id, population, f1, n) %>%
+  arrange(dataset, model, crossvalidation, run_id, population)
 
 macro_summary <- metrics_df %>%
   group_by(model) %>%
@@ -724,7 +810,7 @@ macro_summary_path <- file.path(args$output_dir, "f1_macro_summary_by_model.tsv"
 weighted_summary_path <- file.path(args$output_dir, "f1_weighted_summary_by_model.tsv")
 
 write_table(macro_table, macro_table_path)
-write_table(weighted_table, weighted_table_path)
+write_table(per_population_table, weighted_table_path)
 write_table(macro_summary, macro_summary_path)
 write_table(weighted_summary, weighted_summary_path)
 
