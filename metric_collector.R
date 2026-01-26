@@ -1111,7 +1111,7 @@ per_population_df <- per_population_df %>%
         f1_macro,
         precision_macro,
         recall_macro,
-        accuracy,
+        overall_accuracy = accuracy,
         mcc,
         pop_freq_corr,
         overlap,
