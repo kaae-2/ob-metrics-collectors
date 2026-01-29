@@ -289,6 +289,28 @@ read_metrics_json <- function(path) {
   jsonlite::fromJSON(payload, simplifyVector = FALSE)
 }
 
+collect_dataset_metadata <- function(paths) {
+  metadata_by_dataset <- list()
+  metadata_cache <- list()
+  for (path in paths) {
+    payload <- read_metrics_json(path)
+    dataset_metadata <- payload$dataset_metadata
+    if (is.null(dataset_metadata) || length(dataset_metadata) == 0) {
+      next
+    }
+    lineage <- parse_lineage(path, payload)
+    dataset <- lineage$dataset %||% payload$name %||% "unknown_dataset"
+    encoded <- jsonlite::toJSON(dataset_metadata, auto_unbox = TRUE, null = "null")
+    existing <- metadata_cache[[dataset]] %||% NA_character_
+    if (!is.na(existing) && existing != encoded) {
+      stop(sprintf("Conflicting dataset metadata for '%s'.", dataset))
+    }
+    metadata_cache[[dataset]] <- encoded
+    metadata_by_dataset[[dataset]] <- dataset_metadata
+  }
+  metadata_by_dataset
+}
+
 extract_match <- function(path, pattern, default_value) {
   match <- str_match(path, pattern)
   ifelse(is.na(match[, 2]), default_value, match[, 2])
@@ -318,7 +340,7 @@ compute_weighted_f1 <- function(per_population) {
   }
   pop_entries <- lapply(per_population, function(entry) {
     f1 <- as.numeric(entry$f1 %||% NA_real_)
-    n_val <- entry$n %||% entry$support %||% NA_real_
+    n_val <- entry$n_cells %||% entry$n %||% entry$support %||% NA_real_
     list(f1 = f1, n = as.numeric(n_val))
   })
   f1_vals <- sapply(pop_entries, function(entry) entry$f1)
@@ -358,7 +380,7 @@ collect_metrics <- function(path) {
   rows <- lapply(names(results), function(run_id) {
     run <- results[[run_id]]
     weighted <- compute_weighted_f1(run$per_population)
-    n_samples <- run$n %||% weighted$total_n
+    n_cells <- run$n_cells %||% run$n %||% weighted$total_n
     tibble(
       dataset = lineage$dataset,
       model = lineage$model,
@@ -376,7 +398,7 @@ collect_metrics <- function(path) {
         run$scalability_seconds_per_item %||% NA_real_
       ),
       f1_weighted = as.numeric(weighted$weighted_f1),
-      n_samples = as.numeric(n_samples),
+      n_cells = as.numeric(n_cells),
       source_path = path
     )
   })
@@ -421,7 +443,7 @@ collect_per_population <- function(path) {
     pop_rows <- lapply(names(per_population), function(pop_id) {
       entry <- per_population[[pop_id]]
       f1 <- as.numeric(entry$f1 %||% NA_real_)
-      n_val <- entry$n %||% entry$support %||% NA_real_
+      n_val <- entry$support %||% entry$n_cells %||% entry$n %||% NA_real_
       tibble(
         dataset = lineage$dataset,
         model = lineage$model,
@@ -551,7 +573,7 @@ plot_runtime_scatter <- function(df, value_col, output_path, title) {
   if (nrow(df) == 0) {
     return(invisible())
   }
-  plot <- ggplot(df, aes(x = n_samples, y = .data[[value_col]])) +
+  plot <- ggplot(df, aes(x = n_cells, y = .data[[value_col]])) +
     geom_point(aes(size = runtime_seconds), alpha = 0.6) +
     scale_size_continuous(labels = label_number()) +
     facet_wrap(~dataset, scales = "free") +
@@ -962,6 +984,7 @@ order_map <- build_order_map(order_paths)
 
 metrics_rows <- lapply(input_paths, collect_metrics)
 per_population_rows <- lapply(input_paths, collect_per_population)
+dataset_metadata <- collect_dataset_metadata(input_paths)
 metrics_df <- bind_rows(metrics_rows)
 metrics_df <- ensure_columns(
   metrics_df,
@@ -1107,7 +1130,7 @@ per_population_df <- per_population_df %>%
         model,
         crossvalidation,
         run_id,
-        n_samples,
+        n_cells,
         f1_macro,
         precision_macro,
         recall_macro,
@@ -1122,11 +1145,11 @@ per_population_df <- per_population_df %>%
   )
 
 macro_table <- metrics_df %>%
-  select(dataset, model, crossvalidation, run_id, f1_macro, n_samples) %>%
+  select(dataset, model, crossvalidation, run_id, f1_macro, n_cells) %>%
   arrange(dataset, model, crossvalidation, run_id)
 
 per_population_table <- per_population_df %>%
-  mutate(support_fraction = ifelse(n_samples > 0, support / n_samples, NA_real_)) %>%
+  mutate(support_fraction = ifelse(n_cells > 0, support / n_cells, NA_real_)) %>%
   select(
     dataset,
     model,
@@ -1140,7 +1163,7 @@ per_population_table <- per_population_df %>%
     recall,
     accuracy,
     support,
-    n_samples,
+    n_cells,
     support_fraction,
     tp,
     fp,
@@ -1153,7 +1176,7 @@ run_metrics_table <- metrics_df %>%
   mutate(
     throughput_events_per_sec = ifelse(
       runtime_seconds > 0,
-      n_samples / runtime_seconds,
+      n_cells / runtime_seconds,
       NA_real_
     )
   ) %>%
@@ -1162,7 +1185,7 @@ run_metrics_table <- metrics_df %>%
     model,
     crossvalidation,
     run_id,
-    n_samples,
+    n_cells,
     f1_macro,
     precision_macro,
     recall_macro,
@@ -1226,7 +1249,7 @@ per_population_confusion <- per_population_df %>%
   arrange(dataset, model, crossvalidation, run_id, population)
 
 rare_population_table <- per_population_df %>%
-  mutate(support_fraction = ifelse(n_samples > 0, support / n_samples, NA_real_)) %>%
+  mutate(support_fraction = ifelse(n_cells > 0, support / n_cells, NA_real_)) %>%
   mutate(rare_bucket = vapply(support_fraction, bucket_support_fraction, character(1))) %>%
   group_by(dataset, model, crossvalidation, run_id, rare_bucket) %>%
   summarize(
@@ -1235,14 +1258,14 @@ rare_population_table <- per_population_df %>%
     median_precision = median(precision, na.rm = TRUE),
     median_recall = median(recall, na.rm = TRUE),
     total_support = sum(support, na.rm = TRUE),
-    n_samples = ifelse(
-      all(is.na(n_samples)),
+    n_cells = ifelse(
+      all(is.na(n_cells)),
       NA_real_,
-      max(n_samples, na.rm = TRUE)
+      max(n_cells, na.rm = TRUE)
     ),
     support_share = ifelse(
-      !all(is.na(n_samples)) && max(n_samples, na.rm = TRUE) > 0,
-      sum(support, na.rm = TRUE) / max(n_samples, na.rm = TRUE),
+      !all(is.na(n_cells)) && max(n_cells, na.rm = TRUE) > 0,
+      sum(support, na.rm = TRUE) / max(n_cells, na.rm = TRUE),
       NA_real_
     ),
     .groups = "drop"
@@ -1251,10 +1274,10 @@ rare_population_table <- per_population_df %>%
 dataset_context_table <- per_population_df %>%
   group_by(dataset, model, crossvalidation, run_id) %>%
   summarize(
-    n_samples = ifelse(
-      all(is.na(n_samples)),
+    n_cells = ifelse(
+      all(is.na(n_cells)),
       NA_real_,
-      max(n_samples, na.rm = TRUE)
+      max(n_cells, na.rm = TRUE)
     ),
     n_populations = n_distinct(population),
     min_support = ifelse(all(is.na(support)), NA_real_, min(support, na.rm = TRUE)),
@@ -1322,6 +1345,7 @@ rare_population_path <- file.path(args$output_dir, "rare_population_buckets.tsv"
 dataset_context_path <- file.path(args$output_dir, "dataset_context.tsv")
 dominant_fnr_path <- file.path(args$output_dir, "dominant_errors_fnr.tsv")
 dominant_fpr_path <- file.path(args$output_dir, "dominant_errors_fpr.tsv")
+dataset_metadata_path <- file.path(args$output_dir, "dataset_metadata.json")
 
 write_table(macro_table, macro_table_path)
 write_table(per_population_table, weighted_table_path)
@@ -1335,6 +1359,12 @@ write_table(rare_population_table, rare_population_path)
 write_table(dataset_context_table, dataset_context_path)
 write_table(dominant_fnr_table, dominant_fnr_path)
 write_table(dominant_fpr_table, dominant_fpr_path)
+jsonlite::write_json(
+  dataset_metadata,
+  dataset_metadata_path,
+  auto_unbox = TRUE,
+  pretty = TRUE
+)
 
 plot_dir <- file.path(args$output_dir, "plots")
 dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
@@ -1360,13 +1390,13 @@ plot_boxplot(
 )
 
 runtime_scatter_df <- run_metrics_table %>%
-  filter(!is.na(runtime_seconds) & !is.na(n_samples))
+  filter(!is.na(runtime_seconds) & !is.na(n_cells))
 plot_simple_scatter(
   runtime_scatter_df,
-  "n_samples",
+  "n_cells",
   "runtime_seconds",
   runtime_scatter_path,
-  "Runtime vs Sample Size",
+  "Runtime vs Cell Count",
   facet_col = "dataset"
 )
 
@@ -1401,7 +1431,7 @@ if (performance_available && nrow(performance) == 0) {
 scatter_table <- metrics_df %>%
   group_by(dataset, model, crossvalidation) %>%
   summarize(
-    n_samples = median(n_samples, na.rm = TRUE),
+    n_cells = median(n_cells, na.rm = TRUE),
     f1_macro_median = median(f1_macro, na.rm = TRUE),
     f1_weighted_median = median(f1_weighted, na.rm = TRUE),
     .groups = "drop"
@@ -1425,13 +1455,13 @@ if (performance_available && nrow(scatter_joined) > 0) {
     scatter_joined,
     "f1_macro_median",
     macro_scatter_path,
-    "Sample Size vs Median Macro F1"
+    "Cell Count vs Median Macro F1"
   )
   plot_runtime_scatter(
     scatter_joined,
     "f1_weighted_median",
     weighted_scatter_path,
-    "Sample Size vs Median Weighted F1"
+    "Cell Count vs Median Weighted F1"
   )
 }
 
