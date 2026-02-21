@@ -1309,8 +1309,6 @@ macro_table <- metrics_df %>%
   select(
     dataset,
     model,
-    model_base,
-    model_variant,
     crossvalidation,
     run_id,
     f1_macro,
@@ -1323,8 +1321,6 @@ per_population_table <- per_population_df %>%
   select(
     dataset,
     model,
-    model_base,
-    model_variant,
     crossvalidation,
     run_id,
     population_id,
@@ -1355,8 +1351,6 @@ run_metrics_table <- metrics_df %>%
   select(
     dataset,
     model,
-    model_base,
-    model_variant,
     crossvalidation,
     run_id,
     n_cells,
@@ -1377,8 +1371,6 @@ per_population_summary <- per_population_df %>%
   group_by(
     dataset,
     model,
-    model_base,
-    model_variant,
     population_id,
     population_name,
     population
@@ -1397,8 +1389,6 @@ per_population_stability <- per_population_df %>%
   group_by(
     dataset,
     model,
-    model_base,
-    model_variant,
     population_id,
     population_name,
     population
@@ -1422,8 +1412,6 @@ per_population_confusion <- per_population_df %>%
   select(
     dataset,
     model,
-    model_base,
-    model_variant,
     crossvalidation,
     run_id,
     population_id,
@@ -1443,7 +1431,7 @@ per_population_confusion <- per_population_df %>%
 rare_population_table <- per_population_df %>%
   mutate(support_fraction = ifelse(n_cells > 0, support / n_cells, NA_real_)) %>%
   mutate(rare_bucket = vapply(support_fraction, bucket_support_fraction, character(1))) %>%
-  group_by(dataset, model, model_base, model_variant, crossvalidation, run_id, rare_bucket) %>%
+  group_by(dataset, model, crossvalidation, run_id, rare_bucket) %>%
   summarize(
     n_populations = n(),
     median_f1 = median(f1, na.rm = TRUE),
@@ -1464,7 +1452,7 @@ rare_population_table <- per_population_df %>%
   )
 
 dataset_context_table <- per_population_df %>%
-  group_by(dataset, model, model_base, model_variant, crossvalidation, run_id) %>%
+  group_by(dataset, model, crossvalidation, run_id) %>%
   summarize(
     n_cells = ifelse(
       all(is.na(n_cells)),
@@ -1489,17 +1477,17 @@ dataset_context_table <- per_population_df %>%
   )
 
 dominant_fnr_table <- per_population_confusion %>%
-  group_by(dataset, model, model_base, model_variant, crossvalidation, run_id) %>%
+  group_by(dataset, model, crossvalidation, run_id) %>%
   slice_max(order_by = fnr, n = 5, with_ties = FALSE) %>%
   ungroup()
 
 dominant_fpr_table <- per_population_confusion %>%
-  group_by(dataset, model, model_base, model_variant, crossvalidation, run_id) %>%
+  group_by(dataset, model, crossvalidation, run_id) %>%
   slice_max(order_by = fpr, n = 5, with_ties = FALSE) %>%
   ungroup()
 
 macro_summary <- metrics_df %>%
-  group_by(model, model_base, model_variant) %>%
+  group_by(model) %>%
   summarize(
     median_f1_macro = median(f1_macro, na.rm = TRUE),
     mean_f1_macro = mean(f1_macro, na.rm = TRUE),
@@ -1508,7 +1496,7 @@ macro_summary <- metrics_df %>%
   )
 
 weighted_summary <- metrics_df %>%
-  group_by(model, model_base, model_variant) %>%
+  group_by(model) %>%
   summarize(
     median_f1_weighted = median(f1_weighted, na.rm = TRUE),
     mean_f1_weighted = mean(f1_weighted, na.rm = TRUE),
