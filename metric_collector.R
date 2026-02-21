@@ -212,45 +212,87 @@ read_analysis_parameters <- function(path) {
   params
 }
 
-format_variant_from_parameters <- function(params) {
-  if (is.null(params) || length(params) == 0) {
-    return(NA_character_)
+param_value_to_string <- function(value) {
+  if (is.null(value)) {
+    return("missing")
   }
-  keys <- sort(names(params))
-  if (length(keys) == 0) {
-    return(NA_character_)
+  if (length(value) == 0) {
+    return("empty")
   }
-  parts <- vapply(keys, function(key) {
-    value <- params[[key]]
-    if (length(value) > 1) {
-      value <- paste(value, collapse = "-")
-    }
-    sprintf("%s-%s", sanitize_label(key), sanitize_label(value))
-  }, character(1))
-  label <- paste(parts, collapse = "_")
-  if (nchar(label) > 64) {
-    return(substr(label, 1, 64))
-  }
-  label
+  paste(as.character(value), collapse = "-")
 }
 
-resolve_model_variant_label <- function(model_params, source_path) {
-  if (is.na(model_params) || model_params == "" || model_params == "default") {
-    return("default")
+derive_model_variant_lookup <- function(metrics_df) {
+  base <- metrics_df %>%
+    distinct(model_base, model_params, source_path)
+
+  if (nrow(base) == 0) {
+    return(tibble(model_base = character(), model_params = character(), model_variant = character(), model = character()))
   }
 
-  if (startsWith(model_params, ".")) {
-    params <- read_analysis_parameters(source_path)
-    label <- format_variant_from_parameters(params)
-    if (!is.na(label) && label != "") {
-      return(label)
-    }
-  }
+  base <- base %>%
+    mutate(
+      params_obj = lapply(source_path, read_analysis_parameters),
+      params_obj = lapply(params_obj, function(obj) {
+        if (is.null(obj) || !is.list(obj)) {
+          return(list())
+        }
+        obj
+      })
+    )
 
-  if (startsWith(model_params, ".") && nchar(model_params) > 13) {
-    return(substr(model_params, 2, 13))
-  }
-  model_params
+  groups <- split(base, base$model_base)
+  out <- lapply(groups, function(group_df) {
+    all_keys <- sort(unique(unlist(lapply(group_df$params_obj, names))))
+    varying_keys <- all_keys[vapply(all_keys, function(key) {
+      values <- unique(vapply(group_df$params_obj, function(obj) {
+        param_value_to_string(obj[[key]])
+      }, character(1)))
+      length(values) > 1
+    }, logical(1))]
+
+    variants <- vapply(seq_len(nrow(group_df)), function(idx) {
+      model_params <- group_df$model_params[[idx]]
+      params_obj <- group_df$params_obj[[idx]]
+
+      if (is.na(model_params) || model_params == "" || model_params == "default") {
+        return("default")
+      }
+
+      if (length(varying_keys) == 0) {
+        if (startsWith(model_params, ".") && nchar(model_params) > 13) {
+          return(substr(model_params, 2, 13))
+        }
+        return(sanitize_label(model_params))
+      }
+
+      values <- vapply(varying_keys, function(key) {
+        sanitize_label(param_value_to_string(params_obj[[key]]))
+      }, character(1))
+
+      if (length(varying_keys) == 1) {
+        return(values[[1]])
+      }
+
+      pieces <- vapply(seq_along(varying_keys), function(i) {
+        sprintf("%s-%s", sanitize_label(varying_keys[[i]]), values[[i]])
+      }, character(1))
+      paste(pieces, collapse = "_")
+    }, character(1))
+
+    tibble(
+      model_base = group_df$model_base,
+      model_params = group_df$model_params,
+      model_variant = variants,
+      model = ifelse(
+        variants == "default",
+        group_df$model_base,
+        sprintf("%s[%s]", group_df$model_base, variants)
+      )
+    )
+  })
+
+  bind_rows(out) %>% distinct(model_base, model_params, .keep_all = TRUE)
 }
 
 read_order_sample_count <- function(path) {
@@ -390,12 +432,8 @@ parse_lineage <- function(path, payload) {
   dataset <- ifelse(dataset == "", payload$name %||% "unknown_dataset", dataset)
   model_base <- extract_match(normalized, "/analysis/([^/]+)/", "unknown_model")
   model_params <- extract_match(normalized, "/analysis/[^/]+/([^/]+)/", "default")
-  model_variant <- resolve_model_variant_label(model_params, normalized)
-  model <- ifelse(
-    model_variant == "default",
-    model_base,
-    sprintf("%s[%s]", model_base, model_variant)
-  )
+  model_variant <- model_params
+  model <- model_base
   crossvalidation <- extract_match(
     normalized,
     "/preprocessing/[^/]+/([^/]+)/",
@@ -617,6 +655,9 @@ parse_performance <- function(path) {
     tibble::tibble(
       dataset = character(),
       model = character(),
+      model_base = character(),
+      model_variant = character(),
+      model_params = character(),
       crossvalidation = character(),
       runtime_seconds = numeric()
     )
@@ -634,16 +675,8 @@ parse_performance <- function(path) {
       normalized_path = str_replace_all(path, "\\\\", "/"),
       model_base = extract_match(normalized_path, "/analysis/([^/]+)/", "unknown_model"),
       model_params = extract_match(normalized_path, "/analysis/[^/]+/([^/]+)/", "default"),
-      model_variant = vapply(
-        seq_len(n()),
-        function(idx) resolve_model_variant_label(model_params[[idx]], normalized_path[[idx]]),
-        character(1)
-      ),
-      model = ifelse(
-        model_variant == "default",
-        model_base,
-        sprintf("%s[%s]", model_base, model_variant)
-      ),
+      model_variant = model_params,
+      model = model_base,
       crossvalidation = extract_match(
         normalized_path,
         "/preprocessing/[^/]+/([^/]+)/",
@@ -1119,6 +1152,33 @@ if (nrow(metrics_df) == 0) {
   stop("No metrics rows parsed from inputs")
 }
 
+variant_lookup <- derive_model_variant_lookup(metrics_df)
+if (nrow(variant_lookup) > 0) {
+  metrics_df <- metrics_df %>%
+    left_join(
+      variant_lookup,
+      by = c("model_base", "model_params"),
+      suffix = c("", ".resolved")
+    ) %>%
+    mutate(
+      model_variant = coalesce(model_variant.resolved, model_variant),
+      model = coalesce(model.resolved, model)
+    ) %>%
+    select(-model_variant.resolved, -model.resolved)
+
+  per_population_df <- per_population_df %>%
+    left_join(
+      variant_lookup,
+      by = c("model_base", "model_params"),
+      suffix = c("", ".resolved")
+    ) %>%
+    mutate(
+      model_variant = coalesce(model_variant.resolved, model_variant),
+      model = coalesce(model.resolved, model)
+    ) %>%
+    select(-model_variant.resolved, -model.resolved)
+}
+
 missing_datasets <- setdiff(unique(metrics_df$dataset), names(order_map))
 if (length(missing_datasets) > 0) {
   stop(
@@ -1192,7 +1252,7 @@ per_population_df <- per_population_df %>%
   )
 
 deduped_metrics <- metrics_df %>%
-  distinct(dataset, model, run_id, effective_crossvalidation, .keep_all = TRUE)
+  distinct(dataset, model_base, model_params, run_id, effective_crossvalidation, .keep_all = TRUE)
 if (nrow(deduped_metrics) < nrow(metrics_df)) {
   warning(
     sprintf(
@@ -1210,7 +1270,8 @@ metrics_df <- deduped_metrics %>%
 per_population_df <- per_population_df %>%
   distinct(
     dataset,
-    model,
+    model_base,
+    model_params,
     run_id,
     effective_crossvalidation,
     population_id,
@@ -1225,6 +1286,9 @@ per_population_df <- per_population_df %>%
       select(
         dataset,
         model,
+        model_base,
+        model_variant,
+        model_params,
         crossvalidation,
         run_id,
         n_cells,
@@ -1238,7 +1302,7 @@ per_population_df <- per_population_df %>%
         runtime_seconds,
         scalability_seconds_per_item
       ),
-    by = c("dataset", "model", "crossvalidation", "run_id")
+    by = c("dataset", "model", "model_base", "model_variant", "model_params", "crossvalidation", "run_id")
   )
 
 macro_table <- metrics_df %>%
@@ -1549,6 +1613,19 @@ if (!performance_available) {
   performance_note <- "Runtime scatter plots skipped because performances.tsv was not found."
 }
 performance <- parse_performance(perf_path)
+if (nrow(performance) > 0 && nrow(variant_lookup) > 0) {
+  performance <- performance %>%
+    left_join(
+      variant_lookup,
+      by = c("model_base", "model_params"),
+      suffix = c("", ".resolved")
+    ) %>%
+    mutate(
+      model_variant = coalesce(model_variant.resolved, model_variant),
+      model = coalesce(model.resolved, model)
+    ) %>%
+    select(-model_variant.resolved, -model.resolved)
+}
 if (performance_available && nrow(performance) == 0) {
   performance_available <- FALSE
   if (is.null(performance_note)) {
