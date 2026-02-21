@@ -190,6 +190,69 @@ dataset_root_from_path <- function(path) {
   ifelse(is.na(match[, 2]), NA_character_, match[, 2])
 }
 
+analysis_root_from_path <- function(path) {
+  normalized <- str_replace_all(path, "\\\\", "/")
+  match <- str_match(normalized, "(.*/analysis/[^/]+/[^/]+)")
+  ifelse(is.na(match[, 2]), NA_character_, match[, 2])
+}
+
+read_analysis_parameters <- function(path) {
+  root <- analysis_root_from_path(path)
+  if (is.na(root) || root == "") {
+    return(NULL)
+  }
+  params_path <- file.path(root, "parameters.json")
+  if (!file.exists(params_path)) {
+    return(NULL)
+  }
+  params <- jsonlite::fromJSON(params_path, simplifyVector = FALSE)
+  if (!is.list(params)) {
+    return(NULL)
+  }
+  params
+}
+
+format_variant_from_parameters <- function(params) {
+  if (is.null(params) || length(params) == 0) {
+    return(NA_character_)
+  }
+  keys <- sort(names(params))
+  if (length(keys) == 0) {
+    return(NA_character_)
+  }
+  parts <- vapply(keys, function(key) {
+    value <- params[[key]]
+    if (length(value) > 1) {
+      value <- paste(value, collapse = "-")
+    }
+    sprintf("%s-%s", sanitize_label(key), sanitize_label(value))
+  }, character(1))
+  label <- paste(parts, collapse = "_")
+  if (nchar(label) > 64) {
+    return(substr(label, 1, 64))
+  }
+  label
+}
+
+resolve_model_variant_label <- function(model_params, source_path) {
+  if (is.na(model_params) || model_params == "" || model_params == "default") {
+    return("default")
+  }
+
+  if (startsWith(model_params, ".")) {
+    params <- read_analysis_parameters(source_path)
+    label <- format_variant_from_parameters(params)
+    if (!is.na(label) && label != "") {
+      return(label)
+    }
+  }
+
+  if (startsWith(model_params, ".") && nchar(model_params) > 13) {
+    return(substr(model_params, 2, 13))
+  }
+  model_params
+}
+
 read_order_sample_count <- function(path) {
   if (!file.exists(path)) {
     stop(sprintf("Order file not found: %s", path))
@@ -325,13 +388,27 @@ parse_lineage <- function(path, payload) {
     ""
   )
   dataset <- ifelse(dataset == "", payload$name %||% "unknown_dataset", dataset)
-  model <- extract_match(normalized, "/analysis/([^/]+)/", "unknown_model")
+  model_base <- extract_match(normalized, "/analysis/([^/]+)/", "unknown_model")
+  model_params <- extract_match(normalized, "/analysis/[^/]+/([^/]+)/", "default")
+  model_variant <- resolve_model_variant_label(model_params, normalized)
+  model <- ifelse(
+    model_variant == "default",
+    model_base,
+    sprintf("%s[%s]", model_base, model_variant)
+  )
   crossvalidation <- extract_match(
     normalized,
     "/preprocessing/[^/]+/([^/]+)/",
     "unknown_crossvalidation"
   )
-  list(dataset = dataset, model = model, crossvalidation = crossvalidation)
+  list(
+    dataset = dataset,
+    model = model,
+    model_base = model_base,
+    model_params = model_params,
+    model_variant = model_variant,
+    crossvalidation = crossvalidation
+  )
 }
 
 compute_weighted_f1 <- function(per_population) {
@@ -384,6 +461,9 @@ collect_metrics <- function(path) {
     tibble(
       dataset = lineage$dataset,
       model = lineage$model,
+      model_base = lineage$model_base,
+      model_variant = lineage$model_variant,
+      model_params = lineage$model_params,
       crossvalidation = lineage$crossvalidation,
       run_id = run_id,
       f1_macro = as.numeric(run$f1_macro %||% NA_real_),
@@ -410,6 +490,9 @@ collect_per_population <- function(path) {
     tibble(
       dataset = character(),
       model = character(),
+      model_base = character(),
+      model_variant = character(),
+      model_params = character(),
       crossvalidation = character(),
       run_id = character(),
       population_id = character(),
@@ -444,11 +527,14 @@ collect_per_population <- function(path) {
       entry <- per_population[[pop_id]]
       f1 <- as.numeric(entry$f1 %||% NA_real_)
       n_val <- entry$support %||% entry$n_cells %||% entry$n %||% NA_real_
-      tibble(
-        dataset = lineage$dataset,
-        model = lineage$model,
-        crossvalidation = lineage$crossvalidation,
-        run_id = run_id,
+        tibble(
+          dataset = lineage$dataset,
+          model = lineage$model,
+          model_base = lineage$model_base,
+          model_variant = lineage$model_variant,
+          model_params = lineage$model_params,
+          crossvalidation = lineage$crossvalidation,
+          run_id = run_id,
         population_id = as.character(pop_id),
         population_name = as.character(entry$population_name %||% NA_character_),
         population = extract_population_label(entry, pop_id),
@@ -546,7 +632,18 @@ parse_performance <- function(path) {
     filter(module == "flow_metrics") %>%
     mutate(
       normalized_path = str_replace_all(path, "\\\\", "/"),
-      model = extract_match(normalized_path, "/analysis/([^/]+)/", "unknown_model"),
+      model_base = extract_match(normalized_path, "/analysis/([^/]+)/", "unknown_model"),
+      model_params = extract_match(normalized_path, "/analysis/[^/]+/([^/]+)/", "default"),
+      model_variant = vapply(
+        seq_len(n()),
+        function(idx) resolve_model_variant_label(model_params[[idx]], normalized_path[[idx]]),
+        character(1)
+      ),
+      model = ifelse(
+        model_variant == "default",
+        model_base,
+        sprintf("%s[%s]", model_base, model_variant)
+      ),
       crossvalidation = extract_match(
         normalized_path,
         "/preprocessing/[^/]+/([^/]+)/",
@@ -1145,7 +1242,16 @@ per_population_df <- per_population_df %>%
   )
 
 macro_table <- metrics_df %>%
-  select(dataset, model, crossvalidation, run_id, f1_macro, n_cells) %>%
+  select(
+    dataset,
+    model,
+    model_base,
+    model_variant,
+    crossvalidation,
+    run_id,
+    f1_macro,
+    n_cells
+  ) %>%
   arrange(dataset, model, crossvalidation, run_id)
 
 per_population_table <- per_population_df %>%
@@ -1153,6 +1259,8 @@ per_population_table <- per_population_df %>%
   select(
     dataset,
     model,
+    model_base,
+    model_variant,
     crossvalidation,
     run_id,
     population_id,
@@ -1183,6 +1291,8 @@ run_metrics_table <- metrics_df %>%
   select(
     dataset,
     model,
+    model_base,
+    model_variant,
     crossvalidation,
     run_id,
     n_cells,
@@ -1200,7 +1310,15 @@ run_metrics_table <- metrics_df %>%
   arrange(dataset, model, crossvalidation, run_id)
 
 per_population_summary <- per_population_df %>%
-  group_by(dataset, model, population_id, population_name, population) %>%
+  group_by(
+    dataset,
+    model,
+    model_base,
+    model_variant,
+    population_id,
+    population_name,
+    population
+  ) %>%
   summarize(
     median_f1 = median(f1, na.rm = TRUE),
     mean_f1 = mean(f1, na.rm = TRUE),
@@ -1212,7 +1330,15 @@ per_population_summary <- per_population_df %>%
   )
 
 per_population_stability <- per_population_df %>%
-  group_by(dataset, model, population_id, population_name, population) %>%
+  group_by(
+    dataset,
+    model,
+    model_base,
+    model_variant,
+    population_id,
+    population_name,
+    population
+  ) %>%
   summarize(
     f1_mean = mean(f1, na.rm = TRUE),
     f1_sd = sd(f1, na.rm = TRUE),
@@ -1232,6 +1358,8 @@ per_population_confusion <- per_population_df %>%
   select(
     dataset,
     model,
+    model_base,
+    model_variant,
     crossvalidation,
     run_id,
     population_id,
@@ -1251,7 +1379,7 @@ per_population_confusion <- per_population_df %>%
 rare_population_table <- per_population_df %>%
   mutate(support_fraction = ifelse(n_cells > 0, support / n_cells, NA_real_)) %>%
   mutate(rare_bucket = vapply(support_fraction, bucket_support_fraction, character(1))) %>%
-  group_by(dataset, model, crossvalidation, run_id, rare_bucket) %>%
+  group_by(dataset, model, model_base, model_variant, crossvalidation, run_id, rare_bucket) %>%
   summarize(
     n_populations = n(),
     median_f1 = median(f1, na.rm = TRUE),
@@ -1272,7 +1400,7 @@ rare_population_table <- per_population_df %>%
   )
 
 dataset_context_table <- per_population_df %>%
-  group_by(dataset, model, crossvalidation, run_id) %>%
+  group_by(dataset, model, model_base, model_variant, crossvalidation, run_id) %>%
   summarize(
     n_cells = ifelse(
       all(is.na(n_cells)),
@@ -1297,17 +1425,17 @@ dataset_context_table <- per_population_df %>%
   )
 
 dominant_fnr_table <- per_population_confusion %>%
-  group_by(dataset, model, crossvalidation, run_id) %>%
+  group_by(dataset, model, model_base, model_variant, crossvalidation, run_id) %>%
   slice_max(order_by = fnr, n = 5, with_ties = FALSE) %>%
   ungroup()
 
 dominant_fpr_table <- per_population_confusion %>%
-  group_by(dataset, model, crossvalidation, run_id) %>%
+  group_by(dataset, model, model_base, model_variant, crossvalidation, run_id) %>%
   slice_max(order_by = fpr, n = 5, with_ties = FALSE) %>%
   ungroup()
 
 macro_summary <- metrics_df %>%
-  group_by(model) %>%
+  group_by(model, model_base, model_variant) %>%
   summarize(
     median_f1_macro = median(f1_macro, na.rm = TRUE),
     mean_f1_macro = mean(f1_macro, na.rm = TRUE),
@@ -1316,7 +1444,7 @@ macro_summary <- metrics_df %>%
   )
 
 weighted_summary <- metrics_df %>%
-  group_by(model) %>%
+  group_by(model, model_base, model_variant) %>%
   summarize(
     median_f1_weighted = median(f1_weighted, na.rm = TRUE),
     mean_f1_weighted = mean(f1_weighted, na.rm = TRUE),

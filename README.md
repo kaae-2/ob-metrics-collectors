@@ -11,6 +11,10 @@ This module aggregates `*.flow_metrics.json.gz` outputs into benchmark reports.
   - `metric_plots.tar.gz`
   - intermediate TSV summary tables
 
+Parameterized model runs (for example multiple GateMeClass settings) are split
+by resolving parameter hashes from each run's `analysis/.../parameters.json`, so
+report tables can separate variants without exposing raw parameter hashes.
+
 ## Run locally
 
 ```bash
