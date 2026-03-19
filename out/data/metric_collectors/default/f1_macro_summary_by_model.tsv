@@ -1,2 +1,1 @@
-model	median_f1_macro	mean_f1_macro	n_runs
-dgcytof	0.821210657973118	0.8298279804947865	12
+/home/kaae2/code/ob/out/metric_collectors/metrics_report/f1_macro_summary_by_model.tsv

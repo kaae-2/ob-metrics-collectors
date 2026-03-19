@@ -1,2 +1,1 @@
-model	median_f1_weighted	mean_f1_weighted	n_runs
-dgcytof	0.9217383377873123	0.9070615500109899	12
+/home/kaae2/code/ob/out/metric_collectors/metrics_report/f1_weighted_summary_by_model.tsv

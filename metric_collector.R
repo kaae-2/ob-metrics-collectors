@@ -684,6 +684,40 @@ compact_dataset_label <- function(dataset_id) {
   cleaned
 }
 
+pretty_model_label <- function(values) {
+  model_map <- c(
+    "cyanno" = "CyAnno",
+    "cygate" = "CyGATE",
+    "dgcytof" = "DGCyTOF",
+    "gatemeclass[e]" = "GateMeClass (E)",
+    "gatemeclass[v]" = "GateMeClass (V)",
+    "knn" = "KNN",
+    "lda" = "LDA",
+    "random" = "Random"
+  )
+
+  raw <- as.character(values)
+  key <- tolower(raw)
+  mapped <- unname(model_map[key])
+  out <- ifelse(!is.na(mapped), mapped, raw)
+  out[is.na(values)] <- NA_character_
+  out
+}
+
+pretty_platform_label <- function(values) {
+  platform_map <- c(
+    "fcm" = "Flow",
+    "cytof" = "CyTOF"
+  )
+
+  raw <- as.character(values)
+  key <- tolower(trimws(raw))
+  mapped <- unname(platform_map[key])
+  out <- ifelse(!is.na(mapped), mapped, raw)
+  out[is.na(values) | trimws(raw) == ""] <- "Unknown"
+  out
+}
+
 build_dataset_metadata_table <- function(metrics_df, dataset_metadata) {
   datasets <- sort(unique(metrics_df$dataset))
   rows <- lapply(datasets, function(dataset_id) {
@@ -725,7 +759,7 @@ build_dataset_metadata_table <- function(metrics_df, dataset_metadata) {
     mutate(
       display_name = ifelse(
         !is.na(n_markers) & !is.na(n_populations),
-        paste0(dataset_label, " (", platform, ", M:", n_markers, ", P:", n_populations, ")"),
+        paste0(dataset_label, " (M:", n_markers, ", P:", n_populations, ")"),
         dataset_label
       )
     )
@@ -751,29 +785,30 @@ generate_figure1_heatmap_boxplot <- function(metrics_df, dataset_meta, plot_dir)
   df <- metrics_df %>%
     filter(!is.na(f1_macro)) %>%
     left_join(dataset_meta, by = "dataset") %>%
-    filter(!is_sub_sampling)
+    filter(!is_sub_sampling) %>%
+    mutate(
+      platform_plot = pretty_platform_label(platform),
+      model_pretty = pretty_model_label(model)
+    )
 
   if (nrow(df) == 0) {
     return(NULL)
   }
 
-  df <- df %>%
-    mutate(platform = coalesce(platform, "Unknown"))
-
   df_no_random <- df %>%
     filter(!str_detect(model, regex("random", ignore_case = TRUE)))
 
   dataset_order <- df_no_random %>%
-    group_by(platform, display_name) %>%
+    group_by(platform_plot, display_name) %>%
     summarize(global_mean = mean(f1_macro, na.rm = TRUE), .groups = "drop") %>%
-    arrange(platform, global_mean) %>%
+    arrange(platform_plot, global_mean) %>%
     pull(display_name)
 
   model_order <- df %>%
-    group_by(model) %>%
+    group_by(model_pretty) %>%
     summarize(global_mean = mean(f1_macro, na.rm = TRUE), .groups = "drop") %>%
     arrange(global_mean) %>%
-    pull(model)
+    pull(model_pretty)
 
   if (length(dataset_order) == 0 || length(model_order) == 0) {
     return(NULL)
@@ -781,15 +816,18 @@ generate_figure1_heatmap_boxplot <- function(metrics_df, dataset_meta, plot_dir)
 
   df <- df %>%
     mutate(
-      model = factor(model, levels = model_order),
+      model_pretty = factor(model_pretty, levels = model_order),
       display_name = factor(display_name, levels = dataset_order)
     )
   df_no_random <- df_no_random %>%
     mutate(display_name = factor(display_name, levels = dataset_order))
 
   heatmap_data <- df %>%
-    group_by(model, display_name, platform) %>%
+    group_by(model_pretty, display_name, platform_plot) %>%
     summarize(mean_f1 = mean(f1_macro, na.rm = TRUE), .groups = "drop") %>%
+    group_by(platform_plot, display_name) %>%
+    tidyr::complete(model_pretty, fill = list(mean_f1 = NA_real_)) %>%
+    ungroup() %>%
     mutate(
       label_text = case_when(
         is.na(mean_f1) | is.nan(mean_f1) ~ "",
@@ -809,16 +847,17 @@ generate_figure1_heatmap_boxplot <- function(metrics_df, dataset_meta, plot_dir)
       plot.margin = margin(2, 2, 2, 2, unit = "pt")
     )
 
-  p_heatmap <- ggplot(heatmap_data, aes(x = display_name, y = model, fill = mean_f1)) +
+  p_heatmap <- ggplot(heatmap_data, aes(x = display_name, y = model_pretty, fill = mean_f1)) +
     geom_tile(color = "white", linewidth = 0.2) +
     geom_text(aes(label = label_text), size = 1.8, color = "black") +
-    facet_grid(. ~ platform, scales = "free_x", space = "free_x") +
-    scale_fill_viridis_c(option = "viridis", limits = c(0, 1), guide = "none") +
+    facet_grid(. ~ platform_plot, scales = "free_x", space = "free_x") +
+    scale_fill_viridis_c(option = "viridis", limits = c(0, 1), na.value = "grey80", guide = "none") +
     scale_x_discrete(position = "top", expand = c(0, 0)) +
     scale_y_discrete(expand = c(0, 0)) +
     labs(x = "", y = NULL) +
     theme_base +
     theme(
+      panel.background = element_rect(fill = "grey92", color = NA),
       axis.text.x = element_text(angle = 45, hjust = 0, vjust = 0),
       panel.spacing = unit(6, "pt"),
       strip.background = element_rect(fill = "grey95", color = NA),
@@ -827,7 +866,7 @@ generate_figure1_heatmap_boxplot <- function(metrics_df, dataset_meta, plot_dir)
       plot.margin = margin(b = 0, r = 3, unit = "pt")
     )
 
-  p_right <- ggplot(df, aes(x = f1_macro, y = model)) +
+  p_right <- ggplot(df, aes(x = f1_macro, y = model_pretty)) +
     geom_boxplot(outlier.size = 0.1, linewidth = 0.25, fill = "white") +
     scale_x_continuous(limits = c(0, 1), breaks = c(0, 0.5, 1)) +
     labs(x = "F1-score", y = NULL) +
@@ -840,7 +879,7 @@ generate_figure1_heatmap_boxplot <- function(metrics_df, dataset_meta, plot_dir)
 
   p_bottom <- ggplot(df_no_random, aes(x = display_name, y = f1_macro)) +
     geom_boxplot(outlier.size = 0.1, linewidth = 0.25, fill = "white") +
-    facet_grid(. ~ platform, scales = "free_x", space = "free_x") +
+    facet_grid(. ~ platform_plot, scales = "free_x", space = "free_x") +
     scale_y_continuous(limits = c(0, 1), breaks = c(0, 0.5, 1)) +
     labs(x = NULL, y = "F1-score") +
     theme_base +
@@ -857,12 +896,13 @@ generate_figure1_heatmap_boxplot <- function(metrics_df, dataset_meta, plot_dir)
 AAAAABB
 AAAAABB
 AAAAABB
+AAAAABB
 CCCCC##
 "
 
   final_plot <- wrap_plots(A = p_heatmap, B = p_right, C = p_bottom, design = design)
 
-  n_tools <- length(unique(df$model))
+  n_tools <- length(unique(df$model_pretty))
   n_datasets <- length(unique(df$display_name))
   final_h <- min(max((n_tools * 8) + 80, 120), 225)
   final_w <- min(max((n_datasets * 15) + 80, 160), 220)
