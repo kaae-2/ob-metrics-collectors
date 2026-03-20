@@ -529,6 +529,7 @@ collect_metrics <- function(path) {
     run <- results[[run_id]]
     weighted <- compute_weighted_f1(run$per_population)
     n_cells <- run$n_cells %||% run$n %||% weighted$total_n
+    n_cells_total <- run$n_cells_total %||% n_cells
     tibble(
       dataset = lineage$dataset,
       model = lineage$model,
@@ -550,6 +551,7 @@ collect_metrics <- function(path) {
       ),
       f1_weighted = as.numeric(weighted$weighted_f1),
       n_cells = as.numeric(n_cells),
+      n_cells_total = as.numeric(n_cells_total),
       source_path = path
     )
   })
@@ -1909,6 +1911,7 @@ metrics_df <- bind_rows(metrics_rows)
 metrics_df <- ensure_columns(
   metrics_df,
   list(
+    n_cells_total = NA_real_,
     precision_macro = NA_real_,
     recall_macro = NA_real_,
     accuracy = NA_real_,
@@ -2081,6 +2084,7 @@ per_population_df <- per_population_df %>%
         model_params,
         crossvalidation,
         run_id,
+        n_cells_total,
         n_cells,
         f1_macro,
         precision_macro,
@@ -2101,6 +2105,7 @@ macro_table <- metrics_df %>%
     model,
     crossvalidation,
     run_id,
+    n_cells_total,
     f1_macro,
     n_cells
   ) %>%
@@ -2144,6 +2149,7 @@ run_metrics_table <- metrics_df %>%
     crossvalidation,
     run_id,
     n_cells,
+    n_cells_total,
     f1_macro,
     precision_macro,
     recall_macro,
