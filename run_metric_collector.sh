@@ -13,7 +13,7 @@ metrics_input="${script_dir}/../out"
 output_dir="${script_dir}/out/data/metric_collectors/default"
 name="metrics_report"
 metrics_scores=()
-data_orders=()
+data_metadata_paths=()
 existing_report_dir=""
 reuse_existing="false"
 
@@ -23,8 +23,8 @@ while [[ $# -gt 0 ]]; do
       metrics_scores+=("$2")
       shift 2
       ;;
-    --data.order)
-      data_orders+=("$2")
+    --data.metadata)
+      data_metadata_paths+=("$2")
       shift 2
       ;;
     --output_dir)
@@ -59,7 +59,7 @@ if [[ "${existing_report_dir}" != "" && "${existing_report_dir}" != /* ]]; then
   fi
 fi
 
-if [[ "${reuse_existing}" != "true" ]] && [ ${#metrics_scores[@]} -eq 0 ] && [ ${#data_orders[@]} -eq 0 ]; then
+if [[ "${reuse_existing}" != "true" ]] && [ ${#metrics_scores[@]} -eq 0 ] && [ ${#data_metadata_paths[@]} -eq 0 ]; then
   auto_report_dir="${metrics_input}/metric_collectors/metrics_report"
   if [ -d "${auto_report_dir}" ]; then
     existing_report_dir="${auto_report_dir}"
@@ -87,16 +87,16 @@ else
     metrics_scores=("${metrics_input}")
   fi
 
-  if [ ${#data_orders[@]} -eq 0 ]; then
+  if [ ${#data_metadata_paths[@]} -eq 0 ]; then
     shopt -s nullglob
-    for path in "${metrics_input}/data/data_import"/*/data_import.order.json.gz; do
-      data_orders+=("$path")
+    for path in "${metrics_input}/data/data_import"/*/data_import.metadata.json.gz; do
+      data_metadata_paths+=("$path")
     done
     shopt -u nullglob
   fi
 
-  if [ ${#data_orders[@]} -eq 0 ]; then
-    echo "No --data.order inputs found or provided." >&2
+  if [ ${#data_metadata_paths[@]} -eq 0 ]; then
+    echo "No --data.metadata inputs found or provided." >&2
     exit 1
   fi
 
@@ -109,8 +109,8 @@ else
     args+=(--metrics.scores "$score")
   done
 
-  for order_path in "${data_orders[@]}"; do
-    args+=(--data.order "$order_path")
+  for metadata_path in "${data_metadata_paths[@]}"; do
+    args+=(--data.metadata "$metadata_path")
   done
 fi
 

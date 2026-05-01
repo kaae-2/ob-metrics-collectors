@@ -33,7 +33,7 @@ bash collectors/run_metric_collector.sh
 You can also pass explicit inputs:
 
 ```bash
-bash collectors/run_metric_collector.sh --metrics.scores out --data.order out/data/data_import/.../data_import.order.json.gz --output_dir collectors/out/data/metric_collectors/default --name metrics_report
+bash collectors/run_metric_collector.sh --metrics.scores out --data.metadata out/data/data_import/.../data_import.metadata.json.gz --output_dir collectors/out/data/metric_collectors/default --name metrics_report
 ```
 
 To rebuild plots/report from an already generated collector output (without
@@ -64,5 +64,5 @@ just benchmark
 - `Rscript` available in `PATH`
 - R dependencies used by `metric_collector.R` (for example `argparse`,
   `jsonlite`, `dplyr`, `tidyr`, `ggplot2`, `readr`, `rmarkdown`)
-- Metrics JSON outputs and corresponding `data.order` files
+- Metrics JSON outputs and corresponding `data.metadata` files
 - Writable output directory

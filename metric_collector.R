@@ -62,12 +62,12 @@ parse_cli_args <- function() {
       help = "Metric score file(s) or directories to search"
     )
     parser$add_argument(
-      "--data.order",
-      dest = "data_order",
+      "--data.metadata",
+      dest = "data_metadata",
       type = "character",
       nargs = "+",
       required = FALSE,
-      help = "Order JSON file(s) from data_import"
+      help = "Metadata JSON file(s) from the data pipeline"
     )
     parser$add_argument(
       "--output_dir",
@@ -85,15 +85,15 @@ parse_cli_args <- function() {
 
     parsed <- parser$parse_args()
     parsed$metrics_scores <- parsed$metrics_scores %||% character()
-    parsed$data_order <- parsed$data_order %||% character()
+    parsed$data_metadata <- parsed$data_metadata %||% character()
     parsed$existing_report_dir <- parsed$existing_report_dir %||% ""
 
     if ((is.null(parsed$existing_report_dir) || parsed$existing_report_dir == "")) {
       if (length(parsed$metrics_scores) == 0) {
         stop("--metrics.scores is required unless --existing_report_dir is set")
       }
-      if (length(parsed$data_order) == 0) {
-        stop("--data.order is required unless --existing_report_dir is set")
+      if (length(parsed$data_metadata) == 0) {
+        stop("--data.metadata is required unless --existing_report_dir is set")
       }
     }
     return(parsed)
@@ -102,7 +102,7 @@ parse_cli_args <- function() {
   args <- commandArgs(trailingOnly = TRUE)
   parsed <- list(
     metrics_scores = character(),
-    data_order = character(),
+    data_metadata = character(),
     output_dir = NULL,
     name = NULL,
     existing_report_dir = ""
@@ -123,8 +123,8 @@ parse_cli_args <- function() {
       }
       if (key == "metrics.scores") {
         parsed$metrics_scores <- c(parsed$metrics_scores, value)
-      } else if (key == "data.order") {
-        parsed$data_order <- c(parsed$data_order, value)
+      } else if (key == "data.metadata") {
+        parsed$data_metadata <- c(parsed$data_metadata, value)
       } else if (key == "output_dir") {
         parsed$output_dir <- value
       } else if (key == "name") {
@@ -140,8 +140,8 @@ parse_cli_args <- function() {
     if (length(parsed$metrics_scores) == 0) {
       stop("--metrics.scores is required unless --existing_report_dir is set")
     }
-    if (length(parsed$data_order) == 0) {
-      stop("--data.order is required unless --existing_report_dir is set")
+    if (length(parsed$data_metadata) == 0) {
+      stop("--data.metadata is required unless --existing_report_dir is set")
     }
   }
   if (is.null(parsed$output_dir) || parsed$output_dir == "") {
@@ -328,20 +328,29 @@ derive_model_variant_lookup <- function(metrics_df) {
   bind_rows(out) %>% distinct(model_base, model_params, .keep_all = TRUE)
 }
 
-read_order_sample_count <- function(path) {
+read_metadata_sample_count <- function(path) {
   if (!file.exists(path)) {
-    stop(sprintf("Order file not found: %s", path))
+    stop(sprintf("Metadata file not found: %s", path))
   }
   con <- gzfile(path, open = "rt")
   on.exit(close(con), add = TRUE)
   payload <- paste(readLines(con, warn = FALSE), collapse = "")
   data <- jsonlite::fromJSON(payload)
-  if (!is.list(data) || is.null(data$order)) {
-    stop(sprintf("Order JSON missing 'order' key: %s", path))
+  if (!is.list(data)) {
+    stop(sprintf("Metadata JSON must decode to an object: %s", path))
   }
-  order <- data$order
+  order <- NULL
+  if (!is.null(data$samples) && is.list(data$samples)) {
+    order <- data$samples$order
+  }
+  if (is.null(order)) {
+    order <- data$order
+  }
+  if (is.null(order)) {
+    stop(sprintf("Metadata JSON missing samples.order: %s", path))
+  }
   if (!is.vector(order) || length(order) == 0) {
-    stop(sprintf("Order JSON must contain a non-empty list: %s", path))
+    stop(sprintf("Metadata JSON must contain a non-empty samples.order list: %s", path))
   }
   length(order)
 }
@@ -355,7 +364,7 @@ build_order_map <- function(paths) {
     if (is.na(dataset) || dataset == "") {
       dataset <- basename(dirname(path))
     }
-    sample_count <- read_order_sample_count(path)
+    sample_count <- read_metadata_sample_count(path)
     existing <- mapping[[dataset]] %||% NA_integer_
     if (!is.na(existing) && existing != sample_count) {
       stop(
@@ -1900,9 +1909,9 @@ if (length(input_paths) == 0) {
   stop("No metrics files found for --metrics.scores")
 }
 
-order_paths <- normalize_paths(unlist(args$data_order))
+order_paths <- normalize_paths(unlist(args$data_metadata))
 if (length(order_paths) == 0) {
-  stop("No order files found for --data.order")
+  stop("No metadata files found for --data.metadata")
 }
 missing_order_paths <- order_paths[!file.exists(order_paths)]
 if (length(missing_order_paths) > 0) {
