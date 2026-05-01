@@ -783,6 +783,12 @@ empty_panel <- function(message_text) {
     theme_void()
 }
 
+filter_plot_metric_rows <- function(df, metric_column) {
+  df %>%
+    filter(!is.na(.data[[metric_column]]), is.finite(.data[[metric_column]])) %>%
+    filter(.data[[metric_column]] >= 0, .data[[metric_column]] <= 1)
+}
+
 generate_figure1_heatmap_boxplot <- function(metrics_df, dataset_meta, plot_dir) {
   df <- metrics_df %>%
     filter(!is.na(f1_macro)) %>%
@@ -934,6 +940,7 @@ prepare_confusion_plot_data <- function(per_population_confusion, dataset_meta) 
 
 generate_figure2_plots <- function(per_population_confusion, dataset_meta, plot_dir) {
   df <- prepare_confusion_plot_data(per_population_confusion, dataset_meta)
+  df <- filter_plot_metric_rows(df, "f1_score")
   if (nrow(df) == 0) {
     return(list())
   }
@@ -997,10 +1004,11 @@ generate_figure2_plots <- function(per_population_confusion, dataset_meta, plot_
 
     p1_data <- ds_data %>% mutate(pop_label = reorder(pop_label, -actual_count))
     p1 <- ggplot(p1_data, aes(x = pop_label, y = f1_score, fill = model, color = model)) +
-      geom_boxplot(outlier.size = 0.2, linewidth = 0.35, alpha = 0.7, width = 0.75, fatten = 1) +
+      geom_boxplot(outlier.size = 0.2, linewidth = 0.35, median.linewidth = 1, alpha = 0.7, width = 0.75) +
       scale_fill_manual(values = tool_colors, name = "Method") +
       scale_color_manual(values = tool_colors, name = "Method") +
-      scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
+      scale_y_continuous(breaks = seq(0, 1, 0.2)) +
+      coord_cartesian(ylim = c(0, 1)) +
       labs(
         title = paste(ds_label, "- Full Population Profile"),
         x = NULL,
@@ -1028,7 +1036,8 @@ generate_figure2_plots <- function(per_population_confusion, dataset_meta, plot_
         (if (n_pop >= 6) facet_grid(. ~ abundance_class, scales = "free_x", space = "free_x") else NULL) +
         scale_fill_manual(values = tool_colors, name = "Method") +
         scale_color_manual(values = tool_colors, name = "Method") +
-        scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
+        scale_y_continuous(breaks = seq(0, 1, 0.2)) +
+        coord_cartesian(ylim = c(0, 1)) +
         labs(
           title = paste(ds_label, "- Most and least prevalent cell populations"),
           x = NULL,
@@ -1069,10 +1078,11 @@ generate_figure2_plots <- function(per_population_confusion, dataset_meta, plot_
     ds_label <- first_non_empty(p_data$dataset_label, fallback = ds_id)
     ds_n_cells <- p_data %>% summarize(dataset_total = max(dataset_total, na.rm = TRUE)) %>% pull(dataset_total)
     p <- ggplot(p_data, aes(x = pop_label, y = f1_score, fill = model, color = model)) +
-      geom_boxplot(outlier.size = 0.05, linewidth = 0.25, alpha = 0.7, width = 0.7, fatten = 0.8) +
+      geom_boxplot(outlier.size = 0.05, linewidth = 0.25, median.linewidth = 0.8, alpha = 0.7, width = 0.7) +
       scale_fill_manual(values = tool_colors) +
       scale_color_manual(values = tool_colors) +
-      scale_y_continuous(limits = c(0, 1), breaks = c(0, 0.5, 1)) +
+      scale_y_continuous(breaks = c(0, 0.5, 1)) +
+      coord_cartesian(ylim = c(0, 1)) +
       labs(title = ds_label, subtitle = paste("N cells:", format(ds_n_cells, big.mark = ","))) +
       sub_theme
     plot_list[[ds_label]] <- p
@@ -1127,11 +1137,12 @@ generate_figure2_plots <- function(per_population_confusion, dataset_meta, plot_
     ds_n_cells <- p_data %>% summarize(dataset_total = max(dataset_total, na.rm = TRUE)) %>% pull(dataset_total)
     n_pop <- length(unique(p_data$population_label))
     p <- ggplot(p_data, aes(x = pop_label_newline, y = f1_score, fill = model, color = model)) +
-      geom_boxplot(outlier.size = 0.1, linewidth = 0.25, alpha = 0.7, width = 0.65, fatten = 1) +
+      geom_boxplot(outlier.size = 0.1, linewidth = 0.25, median.linewidth = 1, alpha = 0.7, width = 0.65) +
       (if (n_pop >= 6) facet_grid(. ~ abundance_class, scales = "free_x", space = "free_x") else NULL) +
       scale_fill_manual(values = tool_colors) +
       scale_color_manual(values = tool_colors) +
-      scale_y_continuous(limits = c(0, 1), breaks = c(0, 0.5, 1)) +
+      scale_y_continuous(breaks = c(0, 0.5, 1)) +
+      coord_cartesian(ylim = c(0, 1)) +
       labs(title = ds_label, subtitle = paste("N cells:", format(ds_n_cells, big.mark = ","))) +
       refined_theme
     plot_list_refined[[ds_label]] <- p
