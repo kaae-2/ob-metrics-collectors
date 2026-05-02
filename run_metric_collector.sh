@@ -89,9 +89,14 @@ else
 
   if [ ${#data_metadata_paths[@]} -eq 0 ]; then
     shopt -s nullglob
-    for path in "${metrics_input}/data/data_import"/*/data_import.metadata.json.gz; do
+    for path in "${metrics_input}/data/data_import"/*/preprocessing/data_preprocessing/*/stratify/data_stratify/*/data_import.metadata.json.gz; do
       data_metadata_paths+=("$path")
     done
+    if [ ${#data_metadata_paths[@]} -eq 0 ]; then
+      for path in "${metrics_input}/data/data_import"/*/data_import.metadata.json.gz; do
+        data_metadata_paths+=("$path")
+      done
+    fi
     shopt -u nullglob
   fi
 
