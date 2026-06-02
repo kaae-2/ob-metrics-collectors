@@ -160,6 +160,29 @@ parse_cli_args <- function() {
   x
 }
 
+sanitize_json_nan <- function(payload) {
+  gsub(
+    "(^|[\\[\\{:,[:space:]])NaN(?=\\s*[,\\]\\}])",
+    "\\1null",
+    payload,
+    perl = TRUE
+  )
+}
+
+parse_json_payload <- function(payload, simplifyVector = TRUE) {
+  jsonlite::fromJSON(sanitize_json_nan(payload), simplifyVector = simplifyVector)
+}
+
+read_json_file <- function(path, simplifyVector = TRUE) {
+  opener <- if (grepl("\\.gz$", path)) gzfile else file
+  con <- opener(path, open = "rt")
+  on.exit(close(con), add = TRUE)
+  parse_json_payload(
+    paste(readLines(con, warn = FALSE), collapse = ""),
+    simplifyVector = simplifyVector
+  )
+}
+
 ensure_columns <- function(df, defaults) {
   for (name in names(defaults)) {
     if (!name %in% names(df)) {
@@ -200,7 +223,7 @@ dataset_label_from_path <- function(path) {
       assign(dataset_root, basename(dataset_root), envir = dataset_label_cache)
       return(basename(dataset_root))
     }
-    parameters <- jsonlite::fromJSON(parameters_path)
+    parameters <- read_json_file(parameters_path)
     if (length(parameters) == 0) {
       assign(dataset_root, basename(dataset_root), envir = dataset_label_cache)
       return(basename(dataset_root))
@@ -238,7 +261,7 @@ read_analysis_parameters <- function(path) {
   if (!file.exists(params_path)) {
     return(NULL)
   }
-  params <- jsonlite::fromJSON(params_path, simplifyVector = FALSE)
+  params <- read_json_file(params_path, simplifyVector = FALSE)
   if (!is.list(params)) {
     return(NULL)
   }
@@ -332,10 +355,7 @@ read_metadata_sample_count <- function(path) {
   if (!file.exists(path)) {
     stop(sprintf("Metadata file not found: %s", path))
   }
-  con <- gzfile(path, open = "rt")
-  on.exit(close(con), add = TRUE)
-  payload <- paste(readLines(con, warn = FALSE), collapse = "")
-  data <- jsonlite::fromJSON(payload)
+  data <- read_json_file(path)
   if (!is.list(data)) {
     stop(sprintf("Metadata JSON must decode to an object: %s", path))
   }
@@ -395,7 +415,7 @@ read_preprocessing_num <- function(dataset_root, crossvalidation) {
   if (!file.exists(params_path)) {
     return(NA_integer_)
   }
-  params <- jsonlite::fromJSON(params_path)
+  params <- read_json_file(params_path)
   if (!is.list(params) || is.null(params$num)) {
     return(NA_integer_)
   }
@@ -427,13 +447,7 @@ expand_metric_inputs <- function(inputs) {
 }
 
 read_metrics_json <- function(path) {
-  con <- gzfile(path, open = "rt")
-  on.exit(close(con), add = TRUE)
-  payload <- paste(readLines(con, warn = FALSE), collapse = "")
-  payload <- gsub("\\bNaN\\b", "null", payload)
-  payload <- gsub("\\bInfinity\\b", "null", payload)
-  payload <- gsub("\\b-Infinity\\b", "null", payload)
-  jsonlite::fromJSON(payload, simplifyVector = FALSE)
+  read_json_file(path, simplifyVector = FALSE)
 }
 
 collect_dataset_metadata <- function(paths) {
@@ -1562,7 +1576,7 @@ run_existing_report_mode <- function(args) {
   metrics_df <- readr::read_tsv(file.path(args$output_dir, table_paths$macro_by_cv), show_col_types = FALSE)
   per_population_confusion <- readr::read_tsv(file.path(args$output_dir, table_paths$per_population_confusion), show_col_types = FALSE)
   run_metrics_table <- readr::read_tsv(file.path(args$output_dir, table_paths$run_metrics), show_col_types = FALSE)
-  dataset_metadata <- jsonlite::fromJSON(file.path(args$output_dir, "dataset_metadata.json"), simplifyVector = FALSE)
+  dataset_metadata <- read_json_file(file.path(args$output_dir, "dataset_metadata.json"), simplifyVector = FALSE)
 
   generate_plots2_suite(
     plot_dir = plot_dir,
