@@ -18,8 +18,11 @@ report tables can separate variants without exposing raw parameter hashes.
 
 The extended plot suite is generated from collector outputs only
 (`f1_macro_by_crossvalidation.tsv`, `per_population_confusion.tsv`,
-`run_metrics.tsv`, `dataset_metadata.json`). Dataset display names default to
-the metadata abbreviation (`expected_abbreviation`) when available.
+`run_metrics.tsv`, `dataset_metadata.json`). The macro and run-level TSVs report
+precision and recall alongside F1 (`precision_macro`, `recall_macro`,
+`precision_weighted`, `recall_weighted`) while preserving the historical F1 file
+names for compatibility. Dataset display names default to the metadata
+abbreviation (`expected_abbreviation`) when available.
 
 Generated plot files now use `fig*` prefixes and include only the rewritten
 figure suite (legacy scatter/boxplot-only files are no longer produced).

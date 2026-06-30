@@ -505,23 +505,41 @@ parse_lineage <- function(path, payload) {
   )
 }
 
-compute_weighted_f1 <- function(per_population) {
+compute_weighted_population_metrics <- function(per_population) {
   if (is.null(per_population) || length(per_population) == 0) {
-    return(list(weighted_f1 = NA_real_, total_n = NA_real_))
+    return(list(
+      weighted_f1 = NA_real_,
+      weighted_precision = NA_real_,
+      weighted_recall = NA_real_,
+      total_n = NA_real_
+    ))
   }
   pop_entries <- lapply(per_population, function(entry) {
     f1 <- as.numeric(entry$f1 %||% NA_real_)
+    precision <- as.numeric(entry$precision %||% NA_real_)
+    recall <- as.numeric(entry$recall %||% NA_real_)
     n_val <- entry$n_cells %||% entry$n %||% entry$support %||% NA_real_
-    list(f1 = f1, n = as.numeric(n_val))
+    list(f1 = f1, precision = precision, recall = recall, n = as.numeric(n_val))
   })
   f1_vals <- sapply(pop_entries, function(entry) entry$f1)
+  precision_vals <- sapply(pop_entries, function(entry) entry$precision)
+  recall_vals <- sapply(pop_entries, function(entry) entry$recall)
   n_vals <- sapply(pop_entries, function(entry) entry$n)
   total_n <- sum(n_vals, na.rm = TRUE)
   if (is.na(total_n) || total_n == 0) {
-    return(list(weighted_f1 = NA_real_, total_n = total_n))
+    return(list(
+      weighted_f1 = NA_real_,
+      weighted_precision = NA_real_,
+      weighted_recall = NA_real_,
+      total_n = total_n
+    ))
   }
-  weighted <- sum(f1_vals * n_vals, na.rm = TRUE) / total_n
-  list(weighted_f1 = weighted, total_n = total_n)
+  list(
+    weighted_f1 = sum(f1_vals * n_vals, na.rm = TRUE) / total_n,
+    weighted_precision = sum(precision_vals * n_vals, na.rm = TRUE) / total_n,
+    weighted_recall = sum(recall_vals * n_vals, na.rm = TRUE) / total_n,
+    total_n = total_n
+  )
 }
 
 extract_population_label <- function(entry, population_id = NA_character_) {
@@ -550,7 +568,7 @@ collect_metrics <- function(path) {
   lineage <- parse_lineage(path, payload)
   rows <- lapply(names(results), function(run_id) {
     run <- results[[run_id]]
-    weighted <- compute_weighted_f1(run$per_population)
+    weighted <- compute_weighted_population_metrics(run$per_population)
     n_cells <- run$n_cells %||% run$n %||% weighted$total_n
     n_cells_total <- run$n_cells_total %||% n_cells
     tibble(
@@ -573,6 +591,8 @@ collect_metrics <- function(path) {
         run$scalability_seconds_per_item %||% NA_real_
       ),
       f1_weighted = as.numeric(weighted$weighted_f1),
+      precision_weighted = as.numeric(weighted$weighted_precision),
+      recall_weighted = as.numeric(weighted$weighted_recall),
       n_cells = as.numeric(n_cells),
       n_cells_total = as.numeric(n_cells_total),
       source_path = path
@@ -2141,6 +2161,8 @@ macro_table <- metrics_df %>%
     run_id,
     n_cells_total,
     f1_macro,
+    precision_macro,
+    recall_macro,
     n_cells
   ) %>%
   arrange(dataset, model, crossvalidation, run_id)
@@ -2187,6 +2209,9 @@ run_metrics_table <- metrics_df %>%
     f1_macro,
     precision_macro,
     recall_macro,
+    f1_weighted,
+    precision_weighted,
+    recall_weighted,
     accuracy,
     mcc,
     pop_freq_corr,
@@ -2209,7 +2234,9 @@ per_population_summary <- per_population_df %>%
     median_f1 = median(f1, na.rm = TRUE),
     mean_f1 = mean(f1, na.rm = TRUE),
     median_precision = median(precision, na.rm = TRUE),
+    mean_precision = mean(precision, na.rm = TRUE),
     median_recall = median(recall, na.rm = TRUE),
+    mean_recall = mean(recall, na.rm = TRUE),
     median_support = median(support, na.rm = TRUE),
     n_runs = n(),
     .groups = "drop"
@@ -2321,6 +2348,10 @@ macro_summary <- metrics_df %>%
   summarize(
     median_f1_macro = median(f1_macro, na.rm = TRUE),
     mean_f1_macro = mean(f1_macro, na.rm = TRUE),
+    median_precision_macro = median(precision_macro, na.rm = TRUE),
+    mean_precision_macro = mean(precision_macro, na.rm = TRUE),
+    median_recall_macro = median(recall_macro, na.rm = TRUE),
+    mean_recall_macro = mean(recall_macro, na.rm = TRUE),
     n_runs = n(),
     .groups = "drop"
   )
@@ -2330,6 +2361,10 @@ weighted_summary <- metrics_df %>%
   summarize(
     median_f1_weighted = median(f1_weighted, na.rm = TRUE),
     mean_f1_weighted = mean(f1_weighted, na.rm = TRUE),
+    median_precision_weighted = median(precision_weighted, na.rm = TRUE),
+    mean_precision_weighted = mean(precision_weighted, na.rm = TRUE),
+    median_recall_weighted = median(recall_weighted, na.rm = TRUE),
+    mean_recall_weighted = mean(recall_weighted, na.rm = TRUE),
     n_runs = n(),
     .groups = "drop"
   )
