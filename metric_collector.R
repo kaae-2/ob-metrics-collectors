@@ -76,27 +76,10 @@ parse_cli_args <- function() {
       help = "Output directory"
     )
     parser$add_argument("--name", type = "character", required = TRUE)
-    parser$add_argument(
-      "--existing_report_dir",
-      type = "character",
-      required = FALSE,
-      help = "Reuse an existing metrics_report directory and regenerate plots/report"
-    )
-
     parsed <- parser$parse_args()
     parsed$metrics_scores <- parsed$metrics_scores %||% character()
     parsed$data_metadata <- parsed$data_metadata %||% character()
-    parsed$existing_report_dir <- parsed$existing_report_dir %||% ""
-
-    if ((is.null(parsed$existing_report_dir) || parsed$existing_report_dir == "")) {
-      if (length(parsed$metrics_scores) == 0) {
-        stop("--metrics.scores is required unless --existing_report_dir is set")
-      }
-      if (length(parsed$data_metadata) == 0) {
-        stop("--data.metadata is required unless --existing_report_dir is set")
-      }
-    }
-    return(parsed)
+    return(finalize_cli_inputs(parsed))
   }
 
   args <- commandArgs(trailingOnly = TRUE)
@@ -104,8 +87,7 @@ parse_cli_args <- function() {
     metrics_scores = character(),
     data_metadata = character(),
     output_dir = NULL,
-    name = NULL,
-    existing_report_dir = ""
+    name = NULL
   )
   i <- 1
   while (i <= length(args)) {
@@ -129,20 +111,29 @@ parse_cli_args <- function() {
         parsed$output_dir <- value
       } else if (key == "name") {
         parsed$name <- value
-      } else if (key == "existing_report_dir") {
-        parsed$existing_report_dir <- value
       }
     }
     i <- i + 1
   }
 
-  if (is.null(parsed$existing_report_dir) || parsed$existing_report_dir == "") {
-    if (length(parsed$metrics_scores) == 0) {
-      stop("--metrics.scores is required unless --existing_report_dir is set")
-    }
-    if (length(parsed$data_metadata) == 0) {
-      stop("--data.metadata is required unless --existing_report_dir is set")
-    }
+  finalize_cli_inputs(parsed)
+}
+
+`%||%` <- function(x, y) {
+  if (is.null(x) || length(x) == 0) {
+    return(y)
+  }
+  x
+}
+
+finalize_cli_inputs <- function(parsed) {
+  parsed$metrics_scores <- parsed$metrics_scores %||% character()
+  parsed$data_metadata <- parsed$data_metadata %||% character()
+  if (length(parsed$metrics_scores) == 0) {
+    stop("--metrics.scores is required")
+  }
+  if (length(parsed$data_metadata) == 0) {
+    stop("--data.metadata is required")
   }
   if (is.null(parsed$output_dir) || parsed$output_dir == "") {
     stop("--output_dir is required")
@@ -151,13 +142,6 @@ parse_cli_args <- function() {
     stop("--name is required")
   }
   parsed
-}
-
-`%||%` <- function(x, y) {
-  if (is.null(x) || length(x) == 0) {
-    return(y)
-  }
-  x
 }
 
 sanitize_json_nan <- function(payload) {
@@ -195,6 +179,16 @@ ensure_columns <- function(df, defaults) {
 normalize_paths <- function(values) {
   unique(values[!is.na(values) & values != ""])
 }
+
+EXPECTED_REQUESTED_RUNS <- 1440L
+EXPECTED_EFFECTIVE_RUNS <- 1386L
+EXPECTED_MODELS <- c("cyanno", "cygate", "dgcytof", "knn", "lda", "random")
+EXPECTED_RUNS_PER_MODEL <- 231L
+EXPECTED_STRATIFICATIONS <- c("unfiltered", "drop-train", "drop-both")
+EXPECTED_METRICS <- c("accuracy", "precision", "recall", "balanced_accuracy", "f1")
+EXPECTED_DATASET_PARAMETERIZATIONS <- 16L
+EXPECTED_REQUESTED_GROUPS <- 288L
+EXPECTED_WRAPPED_ALIASES <- 54L
 
 sanitize_label <- function(value) {
   cleaned <- str_replace_all(as.character(value), "[^A-Za-z0-9._-]+", "-")
@@ -477,6 +471,54 @@ extract_match <- function(path, pattern, default_value) {
   ifelse(is.na(match[, 2]), default_value, match[, 2])
 }
 
+metric_identity_context <- function(payload, path) {
+  audit <- payload$data_metadata$split_audit
+  selection <- audit$identities$stratification$parameters$selection
+  selection <- as.character(unlist(selection, use.names = FALSE))
+  stratification_map <- c(
+    "none" = "unfiltered",
+    "training" = "drop-train",
+    "training_and_test" = "drop-both"
+  )
+  if (length(selection) != 1 || is.na(selection) || !selection %in% names(stratification_map)) {
+    stop(sprintf("Metric split-audit has invalid stratification selection: %s", path))
+  }
+
+  split <- audit$split
+  requested_fold <- suppressWarnings(as.integer(unlist(split$requested_fold, use.names = FALSE)))
+  effective_fold <- suppressWarnings(as.integer(unlist(split$effective_fold, use.names = FALSE)))
+  if (
+    length(requested_fold) != 1 || is.na(requested_fold) || requested_fold < 1 ||
+      length(effective_fold) != 1 || is.na(effective_fold) || effective_fold < 1
+  ) {
+    stop(sprintf("Metric split-audit has invalid requested/effective folds: %s", path))
+  }
+
+  dataset_metadata <- payload$data_metadata$dataset
+  dataset_name <- as.character(unlist(dataset_metadata$dataset_name, use.names = FALSE))
+  if (length(dataset_name) != 1 || is.na(dataset_name) || trimws(dataset_name) == "") {
+    stop(sprintf("Metric metadata is missing dataset.dataset_name: %s", path))
+  }
+  sub_sampling <- suppressWarnings(
+    as.numeric(unlist(dataset_metadata$sub_sampling %||% 0, use.names = FALSE))
+  )
+  if (length(sub_sampling) != 1 || is.na(sub_sampling) || sub_sampling < 0) {
+    stop(sprintf("Metric metadata has invalid dataset.sub_sampling: %s", path))
+  }
+
+  list(
+    dataset_name = dataset_name,
+    dataset_sub_sampling = ifelse(
+      sub_sampling > 0,
+      as.character(sub_sampling),
+      "not_applicable"
+    ),
+    stratification = unname(stratification_map[[selection]]),
+    requested_fold = requested_fold,
+    effective_fold = effective_fold
+  )
+}
+
 parse_lineage <- function(path, payload) {
   normalized <- str_replace_all(path, "\\\\", "/")
   dataset_label <- dataset_label_from_path(normalized)
@@ -495,18 +537,24 @@ parse_lineage <- function(path, payload) {
     "/preprocessing/[^/]+/([^/]+)/",
     "unknown_crossvalidation"
   )
-  stratification <- extract_match(
+  stratification_hash <- extract_match(
     normalized,
     "/stratify/[^/]+/([^/]+)/",
     "unknown_stratification"
   )
+  identity <- metric_identity_context(payload, path)
   list(
     dataset = dataset,
+    dataset_name = identity$dataset_name,
+    dataset_sub_sampling = identity$dataset_sub_sampling,
     model = model,
     model_base = model_base,
     model_params = model_params,
     model_variant = model_variant,
-    stratification = stratification,
+    stratification = identity$stratification,
+    stratification_hash = stratification_hash,
+    requested_fold = identity$requested_fold,
+    effective_fold = identity$effective_fold,
     crossvalidation = crossvalidation
   )
 }
@@ -565,8 +613,144 @@ extract_population_label <- function(entry, population_id = NA_character_) {
   as.character(candidates[[1]])
 }
 
+normalize_population_id <- function(value) {
+  raw <- as.character(unlist(value, use.names = FALSE))
+  if (length(raw) != 1 || is.na(raw) || trimws(raw) == "") {
+    return(NA_real_)
+  }
+  normalized <- suppressWarnings(as.numeric(raw))
+  if (length(normalized) != 1 || is.na(normalized) || !is.finite(normalized)) {
+    return(NA_real_)
+  }
+  normalized
+}
+
+extract_split_audit_populations <- function(payload, path) {
+  populations <- payload$data_metadata$split_audit$populations
+  if (is.null(populations)) {
+    stop(
+      sprintf(
+        "Metric payload is missing data_metadata.split_audit.populations: %s",
+        path
+      )
+    )
+  }
+  if (!is.list(populations)) {
+    stop(sprintf("Metric split-audit populations must be a list: %s", path))
+  }
+  if (length(populations) == 0) {
+    return(tibble(
+      population_id_normalized = numeric(),
+      audit_population_id = character(),
+      audit_population_name = character(),
+      nominal_train_count = numeric(),
+      training_support = numeric(),
+      present_in_training = logical(),
+      test_truth_count = numeric()
+    ))
+  }
+
+  rows <- lapply(seq_along(populations), function(idx) {
+    entry <- populations[[idx]]
+    required <- c(
+      "id",
+      "nominal_train_count",
+      "training_support",
+      "present_in_training",
+      "test_truth_count"
+    )
+    if (!is.list(entry) || any(!required %in% names(entry))) {
+      stop(
+        sprintf(
+          "Metric split-audit population %d is missing required fields: %s",
+          idx,
+          path
+        )
+      )
+    }
+
+    population_id <- normalize_population_id(entry$id)
+    counts <- vapply(
+      c("nominal_train_count", "training_support", "test_truth_count"),
+      function(name) {
+        value <- suppressWarnings(as.numeric(unlist(entry[[name]], use.names = FALSE)))
+        if (length(value) != 1 || is.na(value) || !is.finite(value) || value < 0) {
+          stop(
+            sprintf(
+              "Metric split-audit population %d has invalid %s: %s",
+              idx,
+              name,
+              path
+            )
+          )
+        }
+        value
+      },
+      numeric(1)
+    )
+    present_in_training <- unlist(entry$present_in_training, use.names = FALSE)
+    if (
+      is.na(population_id) ||
+        length(present_in_training) != 1 ||
+        !is.logical(present_in_training) ||
+        is.na(present_in_training)
+    ) {
+      stop(sprintf("Metric split-audit population %d is invalid: %s", idx, path))
+    }
+    if (present_in_training != (counts[["training_support"]] > 0)) {
+      stop(
+        sprintf(
+          paste0(
+            "Metric split-audit population %s has present_in_training=%s ",
+            "but training_support=%s: %s"
+          ),
+          as.character(entry$id),
+          present_in_training,
+          counts[["training_support"]],
+          path
+        )
+      )
+    }
+
+    tibble(
+      population_id_normalized = population_id,
+      audit_population_id = as.character(population_id),
+      audit_population_name = as.character(entry$name %||% NA_character_),
+      nominal_train_count = counts[["nominal_train_count"]],
+      training_support = counts[["training_support"]],
+      present_in_training = present_in_training,
+      test_truth_count = counts[["test_truth_count"]]
+    )
+  })
+  audit <- bind_rows(rows)
+  duplicate_ids <- audit$population_id_normalized[duplicated(audit$population_id_normalized)]
+  if (length(duplicate_ids) > 0) {
+    stop(
+      sprintf(
+        "Metric split-audit contains duplicate normalized population IDs (%s): %s",
+        paste(unique(duplicate_ids), collapse = ", "),
+        path
+      )
+    )
+  }
+  audit
+}
+
 collect_metrics <- function(path) {
   payload <- read_metrics_json(path)
+  metrics_requested <- as.character(unlist(payload$metrics_requested, use.names = FALSE))
+  if (
+    length(metrics_requested) != length(EXPECTED_METRICS) ||
+      anyDuplicated(metrics_requested) ||
+      !setequal(metrics_requested, EXPECTED_METRICS)
+  ) {
+    stop(
+      sprintf(
+        "Metric payload does not contain the canonical requested metrics: %s",
+        path
+      )
+    )
+  }
   results <- payload$results
   if (is.null(results) || length(results) == 0) {
     return(tibble())
@@ -576,15 +760,20 @@ collect_metrics <- function(path) {
     run <- results[[run_id]]
     weighted <- compute_weighted_population_metrics(run$per_population)
     n_cells <- run$n_cells %||% run$n %||% weighted$total_n
-      n_cells_total <- run$n_cells_total %||% n_cells
+    n_cells_total <- run$n_cells_total %||% n_cells
     tibble(
       dataset = lineage$dataset,
+      dataset_name = lineage$dataset_name,
+      dataset_sub_sampling = lineage$dataset_sub_sampling,
       model = lineage$model,
       model_base = lineage$model_base,
       model_variant = lineage$model_variant,
       model_params = lineage$model_params,
       stratification = lineage$stratification,
+      stratification_hash = lineage$stratification_hash,
       crossvalidation = lineage$crossvalidation,
+      requested_fold = lineage$requested_fold,
+      effective_fold = lineage$effective_fold,
       run_id = run_id,
       f1_macro = as.numeric(run$f1_macro %||% NA_real_),
       precision_macro = as.numeric(run$precision_macro %||% NA_real_),
@@ -629,12 +818,17 @@ collect_per_population <- function(path) {
   empty_per_population <- function() {
     tibble(
       dataset = character(),
+      dataset_name = character(),
+      dataset_sub_sampling = character(),
       model = character(),
       model_base = character(),
       model_variant = character(),
       model_params = character(),
       stratification = character(),
+      stratification_hash = character(),
       crossvalidation = character(),
+      requested_fold = integer(),
+      effective_fold = integer(),
       run_id = character(),
       population_id = character(),
       population_name = character(),
@@ -649,10 +843,15 @@ collect_per_population <- function(path) {
       tn = numeric(),
       scaling_rate = numeric(),
       support = numeric(),
+      nominal_train_count = numeric(),
+      training_support = numeric(),
+      present_in_training = logical(),
+      test_truth_count = numeric(),
       source_path = character()
     )
   }
   payload <- read_metrics_json(path)
+  audit <- extract_split_audit_populations(payload, path)
   results <- payload$results
   if (is.null(results) || length(results) == 0) {
     return(empty_per_population())
@@ -668,16 +867,22 @@ collect_per_population <- function(path) {
       entry <- per_population[[pop_id]]
       f1 <- as.numeric(entry$f1 %||% NA_real_)
       n_val <- entry$support %||% entry$n_cells %||% entry$n %||% NA_real_
-        tibble(
-          dataset = lineage$dataset,
-          model = lineage$model,
-          model_base = lineage$model_base,
-          model_variant = lineage$model_variant,
+      tibble(
+        dataset = lineage$dataset,
+        dataset_name = lineage$dataset_name,
+        dataset_sub_sampling = lineage$dataset_sub_sampling,
+        model = lineage$model,
+        model_base = lineage$model_base,
+        model_variant = lineage$model_variant,
         model_params = lineage$model_params,
         stratification = lineage$stratification,
+        stratification_hash = lineage$stratification_hash,
         crossvalidation = lineage$crossvalidation,
-          run_id = run_id,
+        requested_fold = lineage$requested_fold,
+        effective_fold = lineage$effective_fold,
+        run_id = run_id,
         population_id = as.character(pop_id),
+        population_id_normalized = normalize_population_id(pop_id),
         population_name = as.character(entry$population_name %||% NA_character_),
         population = extract_population_label(entry, pop_id),
         f1 = f1,
@@ -693,9 +898,378 @@ collect_per_population <- function(path) {
         source_path = path
       )
     })
-    bind_rows(pop_rows)
+    pop_rows <- bind_rows(pop_rows)
+    if (run_id != "run0") {
+      return(
+        pop_rows %>%
+          mutate(
+            nominal_train_count = NA_real_,
+            training_support = NA_real_,
+            present_in_training = NA,
+            test_truth_count = NA_real_
+          ) %>%
+          select(-population_id_normalized)
+      )
+    }
+
+    pop_rows <- pop_rows %>%
+      left_join(audit, by = "population_id_normalized")
+    unmatched_truth <- pop_rows %>%
+      filter(
+        is.na(test_truth_count),
+        (!is.na(support) & support > 0) |
+          (!is.na(tp) & !is.na(fn) & (tp + fn) > 0)
+      )
+    if (nrow(unmatched_truth) > 0) {
+      stop(
+        sprintf(
+          "Truth-present metric populations lack split-audit matches (%s): %s",
+          paste(unique(unmatched_truth$population_id), collapse = ", "),
+          path
+        )
+      )
+    }
+    support_mismatch <- pop_rows %>%
+      filter(
+        !is.na(test_truth_count),
+        is.na(support) | support != test_truth_count
+      )
+    if (nrow(support_mismatch) > 0) {
+      mismatch <- support_mismatch[1, ]
+      stop(
+        sprintf(
+          paste0(
+            "Metric support differs from split-audit test_truth_count for ",
+            "population %s (%s != %s): %s"
+          ),
+          mismatch$population_id,
+          mismatch$support,
+          mismatch$test_truth_count,
+          path
+        )
+      )
+    }
+
+    pop_rows %>%
+      select(-population_id_normalized, -audit_population_id, -audit_population_name)
   })
   bind_rows(rows)
+}
+
+collect_population_availability <- function(path) {
+  payload <- read_metrics_json(path)
+  audit <- extract_split_audit_populations(payload, path)
+  lineage <- parse_lineage(path, payload)
+  audit %>%
+    transmute(
+      dataset = lineage$dataset,
+      dataset_name = lineage$dataset_name,
+      dataset_sub_sampling = lineage$dataset_sub_sampling,
+      model = lineage$model,
+      model_base = lineage$model_base,
+      model_variant = lineage$model_variant,
+      model_params = lineage$model_params,
+      stratification = lineage$stratification,
+      stratification_hash = lineage$stratification_hash,
+      crossvalidation = lineage$crossvalidation,
+      requested_fold = lineage$requested_fold,
+      effective_fold = lineage$effective_fold,
+      run_id = "run0",
+      population_id = audit_population_id,
+      population_name = audit_population_name,
+      nominal_train_count,
+      training_support,
+      present_in_training,
+      test_truth_count,
+      source_path = path
+    )
+}
+
+read_model_wall_seconds <- function(path) {
+  if (!file.exists(path)) {
+    stop(sprintf("Model performance file not found: %s", path))
+  }
+  performance <- tryCatch(
+    readr::read_tsv(path, show_col_types = FALSE, progress = FALSE),
+    error = function(error) {
+      stop(sprintf("Failed to read model performance file %s: %s", path, error$message))
+    }
+  )
+  if (!"s" %in% names(performance) || nrow(performance) != 1) {
+    stop(sprintf("Model performance file must contain one row and column s: %s", path))
+  }
+  seconds <- suppressWarnings(as.numeric(performance$s[[1]]))
+  if (is.na(seconds) || !is.finite(seconds) || seconds < 0) {
+    stop(sprintf("Model performance file has invalid wall time: %s", path))
+  }
+  seconds
+}
+
+build_metric_artifact_context <- function(metric_paths, metadata_paths) {
+  metadata_roots <- dirname(metadata_paths)
+  rows <- lapply(metric_paths, function(metric_path) {
+    stratification_root <- sub("/analysis/.*$", "", metric_path)
+    matches <- metadata_paths[metadata_roots == stratification_root]
+    if (length(matches) != 1) {
+      stop(
+        sprintf(
+          "Expected one data.metadata input beside metric path, found %d: %s",
+          length(matches),
+          metric_path
+        )
+      )
+    }
+
+    metric_payload <- read_metrics_json(metric_path)
+    metadata_payload <- read_json_file(matches[[1]], simplifyVector = FALSE)
+    embedded_metadata <- metric_payload$data_metadata
+    if (is.null(embedded_metadata)) {
+      stop(sprintf("Metric payload has no embedded data metadata: %s", metric_path))
+    }
+    metadata_json <- jsonlite::toJSON(
+      metadata_payload,
+      auto_unbox = TRUE,
+      null = "null",
+      digits = NA
+    )
+    embedded_json <- jsonlite::toJSON(
+      embedded_metadata,
+      auto_unbox = TRUE,
+      null = "null",
+      digits = NA
+    )
+    if (!identical(metadata_json, embedded_json)) {
+      stop(
+        sprintf(
+          "Metric embedded metadata does not match its data.metadata input: %s",
+          metric_path
+        )
+      )
+    }
+
+    analysis_root <- analysis_root_from_path(metric_path)
+    if (is.na(analysis_root) || analysis_root == "") {
+      stop(sprintf("Could not derive analysis root from metric path: %s", metric_path))
+    }
+    metric_name <- sub("\\.flow_metrics\\.json\\.gz$", "", basename(metric_path))
+    prediction_path <- normalizePath(
+      file.path(analysis_root, paste0(metric_name, "_predicted_labels.tar.gz")),
+      winslash = "/",
+      mustWork = FALSE
+    )
+    performance_path <- normalizePath(
+      file.path(analysis_root, paste0(metric_name, "_performance.txt")),
+      winslash = "/",
+      mustWork = FALSE
+    )
+    if (!file.exists(prediction_path)) {
+      stop(sprintf("Prediction archive not found: %s", prediction_path))
+    }
+    wall_seconds <- read_model_wall_seconds(performance_path)
+
+    tibble(
+      source_path = metric_path,
+      metadata_path = matches[[1]],
+      prediction_path = prediction_path,
+      performance_path = performance_path,
+      model_wall_seconds = wall_seconds
+    )
+  })
+  bind_rows(rows)
+}
+
+assert_alias_values_equal <- function(data, key_columns, value_columns, label) {
+  duplicate_rows <- data %>%
+    add_count(across(all_of(key_columns)), name = ".alias_count") %>%
+    filter(.alias_count > 1)
+  if (nrow(duplicate_rows) == 0) {
+    return(invisible(TRUE))
+  }
+
+  group_id <- do.call(
+    interaction,
+    c(
+      lapply(duplicate_rows[key_columns], as.character),
+      list(drop = TRUE, lex.order = TRUE)
+    )
+  )
+  groups <- split(seq_len(nrow(duplicate_rows)), group_id)
+  for (indices in groups) {
+    group <- duplicate_rows[indices, , drop = FALSE]
+    for (column in value_columns) {
+      values <- group[[column]]
+      reference <- values[[1]]
+      equal <- if (is.numeric(values)) {
+        same_missing <- all(is.na(values) == is.na(reference))
+        finite_values <- values[!is.na(values)]
+        same_missing && (
+          length(finite_values) == 0 ||
+            all(
+              is.finite(finite_values) &
+                abs(finite_values - reference) <=
+                  1e-12 * max(1, abs(reference), na.rm = TRUE)
+            )
+        )
+      } else {
+        identical(as.character(values), rep(as.character(reference), length(values)))
+      }
+      if (!isTRUE(equal)) {
+        stop(
+          sprintf(
+            "Wrapped aliases disagree in %s column %s for effective key %s",
+            label,
+            column,
+            paste(as.character(group[1, key_columns, drop = TRUE]), collapse = "|")
+          )
+        )
+      }
+    }
+  }
+  invisible(TRUE)
+}
+
+write_jsonl <- function(df, path) {
+  records <- vapply(seq_len(nrow(df)), function(idx) {
+    jsonlite::toJSON(
+      as.list(df[idx, , drop = FALSE]),
+      auto_unbox = TRUE,
+      na = "null",
+      null = "null",
+      digits = NA
+    )
+  }, character(1))
+  writeLines(records, path, useBytes = TRUE)
+}
+
+write_collector_validation <- function(validation, path) {
+  jsonlite::write_json(
+    validation,
+    path,
+    auto_unbox = TRUE,
+    pretty = TRUE,
+    digits = NA
+  )
+}
+
+build_finalization_outputs <- function(requested_metrics, effective_metrics, output_dir) {
+  accepted_manifest <- effective_metrics %>%
+    transmute(
+      collector_dataset_identity = dataset,
+      dataset = dataset_name,
+      dataset_sub_sampling,
+      model = model_base,
+      stratification,
+      stratification_hash,
+      effective_fold,
+      metric_path = source_path,
+      metadata_path,
+      prediction_path,
+      model_wall_seconds
+    ) %>%
+    arrange(
+      dataset,
+      collector_dataset_identity,
+      effective_fold,
+      stratification,
+      model
+    )
+
+  run_status <- requested_metrics %>%
+    transmute(
+      collector_dataset_identity = dataset,
+      dataset = dataset_name,
+      dataset_sub_sampling,
+      model = model_base,
+      requested_fold,
+      effective_fold,
+      wrapped_fold = requested_fold != effective_fold,
+      stratification,
+      stratification_hash,
+      status = "completed",
+      prediction_path,
+      metric_path = source_path,
+      metadata_path,
+      performance_path,
+      model_wall_seconds
+    ) %>%
+    arrange(
+      dataset,
+      collector_dataset_identity,
+      requested_fold,
+      stratification,
+      model
+    )
+
+  model_wall_times <- effective_metrics %>%
+    transmute(
+      collector_dataset_identity = dataset,
+      dataset = dataset_name,
+      dataset_sub_sampling,
+      model = model_base,
+      stratification,
+      stratification_hash,
+      effective_fold,
+      model_wall_seconds,
+      performance_path,
+      metric_path = source_path
+    )
+
+  paths <- list(
+    accepted_manifest = file.path(output_dir, "accepted-manifest.jsonl"),
+    run_status = file.path(output_dir, "run-status.tsv"),
+    model_wall_times = file.path(output_dir, "model-wall-times.tsv"),
+    collector_validation = file.path(output_dir, "collector-validation-status.json")
+  )
+  write_jsonl(accepted_manifest, paths$accepted_manifest)
+  readr::write_tsv(run_status, paths$run_status)
+  readr::write_tsv(model_wall_times, paths$model_wall_times)
+
+  model_counts <- table(accepted_manifest$model)
+  accepted_key <- c(
+    "collector_dataset_identity",
+    "model",
+    "stratification_hash",
+    "effective_fold"
+  )
+  validation <- list(
+    status = "PASS",
+    counts = list(
+      requested = nrow(requested_metrics),
+      effective = nrow(accepted_manifest),
+      models = length(unique(accepted_manifest$model)),
+      effective_per_model = as.list(model_counts),
+      stratifications = length(unique(accepted_manifest$stratification))
+    ),
+    assertions = list(
+      requested_count = nrow(requested_metrics) == EXPECTED_REQUESTED_RUNS,
+      effective_count = nrow(accepted_manifest) == EXPECTED_EFFECTIVE_RUNS,
+      canonical_models = setequal(unique(accepted_manifest$model), EXPECTED_MODELS),
+      rows_per_model = isTRUE(
+        all(model_counts[EXPECTED_MODELS] == EXPECTED_RUNS_PER_MODEL)
+      ),
+      canonical_stratifications = setequal(
+        unique(accepted_manifest$stratification),
+        EXPECTED_STRATIFICATIONS
+      ),
+      requested_rows_completed = all(run_status$status == "completed"),
+      effective_keys_unique = !anyDuplicated(accepted_manifest[accepted_key]),
+      metric_paths_unique = !anyDuplicated(accepted_manifest$metric_path)
+    ),
+    outputs = list(
+      accepted_manifest = basename(paths$accepted_manifest),
+      run_status = basename(paths$run_status),
+      model_wall_times = basename(paths$model_wall_times),
+      collector_validation = basename(paths$collector_validation),
+      metrics_report = "metrics_report.html",
+      metric_plots = "metric_plots.tar.gz"
+    )
+  )
+  if (!all(unlist(validation$assertions, use.names = FALSE))) {
+    stop("Collector finalization assertions failed before PASS status write")
+  }
+  write_collector_validation(validation, paths$collector_validation)
+
+  list(paths = paths, validation = validation)
 }
 
 write_table <- function(df, path) {
@@ -760,8 +1334,6 @@ pretty_model_label <- function(values) {
     "cyanno" = "CyAnno",
     "cygate" = "CyGATE",
     "dgcytof" = "DGCyTOF",
-    "gatemeclass[e]" = "GateMeClass (E)",
-    "gatemeclass[v]" = "GateMeClass (V)",
     "knn" = "KNN",
     "lda" = "LDA",
     "random" = "Random"
@@ -1534,42 +2106,14 @@ generate_plots2_suite <- function(
   generated
 }
 
-link_or_copy <- function(source, destination) {
-  if (!file.exists(source) && !dir.exists(source)) {
-    stop(sprintf("Source path does not exist: %s", source))
-  }
-  link_target <- suppressWarnings(Sys.readlink(destination))
-  has_link <- !is.na(link_target) && link_target != ""
-  if (file.exists(destination) || dir.exists(destination) || has_link) {
-    unlink(destination, recursive = TRUE, force = TRUE)
-  }
-  ok <- suppressWarnings(file.symlink(source, destination))
-  if (!isTRUE(ok)) {
-    if (dir.exists(source)) {
-      dir.create(destination, recursive = TRUE, showWarnings = FALSE)
-      files <- list.files(source, full.names = TRUE, all.files = TRUE, no.. = TRUE)
-      if (length(files) > 0) {
-        copied <- file.copy(files, destination, recursive = TRUE, overwrite = TRUE)
-        if (!all(copied)) {
-          stop(sprintf("Failed to copy directory contents from %s", source))
-        }
-      }
-    } else {
-      copied <- file.copy(source, destination, overwrite = TRUE)
-      if (!isTRUE(copied)) {
-        stop(sprintf("Failed to copy file from %s", source))
-      }
-    }
-  }
-}
-
 default_table_paths <- function() {
   list(
     macro_by_cv = "f1_macro_by_crossvalidation.tsv",
-    weighted_by_cv = "f1_weighted_by_crossvalidation.tsv",
+    per_population_by_cv = "per_population_by_crossvalidation.tsv",
     macro_summary = "f1_macro_summary_by_model.tsv",
     weighted_summary = "f1_weighted_summary_by_model.tsv",
     run_metrics = "run_metrics.tsv",
+    population_availability = "population_availability_by_crossvalidation.tsv",
     per_population_summary = "per_population_summary.tsv",
     per_population_stability = "per_population_stability.tsv",
     per_population_confusion = "per_population_confusion.tsv",
@@ -1580,12 +2124,6 @@ default_table_paths <- function() {
   )
 }
 
-build_plot_paths_from_dir <- function(plot_dir) {
-  files <- list.files(plot_dir, pattern = "\\.png$", full.names = FALSE)
-  files <- sort(files)
-  as.list(file.path("plots", files))
-}
-
 reset_plot_dir <- function(plot_dir) {
   if (dir.exists(plot_dir)) {
     unlink(plot_dir, recursive = TRUE, force = TRUE)
@@ -1593,74 +2131,65 @@ reset_plot_dir <- function(plot_dir) {
   dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
 }
 
-run_existing_report_mode <- function(args) {
-  source_dir <- normalizePath(args$existing_report_dir, winslash = "/", mustWork = TRUE)
-  table_paths <- default_table_paths()
-  required_files <- unique(c(unlist(table_paths, use.names = FALSE), "dataset_metadata.json"))
-  missing <- required_files[!file.exists(file.path(source_dir, required_files))]
-  if (length(missing) > 0) {
-    stop(
-      sprintf(
-        "Existing report directory is missing required files: %s",
-        paste(missing, collapse = ", ")
-      )
-    )
+repository_script_path <- function(file_name) {
+  script_arg <- grep("^--file=", commandArgs(), value = TRUE)
+  if (length(script_arg) != 1) {
+    stop("Could not determine metric collector script directory")
   }
-
-  for (file_name in required_files) {
-    source_path <- file.path(source_dir, file_name)
-    destination_path <- file.path(args$output_dir, file_name)
-    if (normalizePath(dirname(destination_path), winslash = "/", mustWork = TRUE) == source_dir && basename(destination_path) == basename(source_path)) {
-      next
-    }
-    link_or_copy(source_path, destination_path)
-  }
-
-  plot_dir <- file.path(args$output_dir, "plots")
-  reset_plot_dir(plot_dir)
-
-  metrics_df <- readr::read_tsv(file.path(args$output_dir, table_paths$macro_by_cv), show_col_types = FALSE)
-  per_population_confusion <- readr::read_tsv(file.path(args$output_dir, table_paths$per_population_confusion), show_col_types = FALSE)
-  run_metrics_table <- readr::read_tsv(file.path(args$output_dir, table_paths$run_metrics), show_col_types = FALSE)
-  dataset_metadata <- read_json_file(file.path(args$output_dir, "dataset_metadata.json"), simplifyVector = FALSE)
-
-  generate_plots2_suite(
-    plot_dir = plot_dir,
-    metrics_df = metrics_df,
-    per_population_confusion = per_population_confusion,
-    run_metrics_table = run_metrics_table,
-    dataset_metadata = dataset_metadata
+  collector_path <- normalizePath(
+    sub("^--file=", "", script_arg),
+    winslash = "/",
+    mustWork = TRUE
   )
+  path <- file.path(dirname(collector_path), file_name)
+  if (!file.exists(path)) {
+    stop(sprintf("Repository-local script not found: %s", path))
+  }
+  normalizePath(path, winslash = "/", mustWork = TRUE)
+}
 
-  plot_paths <- build_plot_paths_from_dir(plot_dir)
-  performance_note <- sprintf("Reused existing collector tables from %s", source_dir)
-  render_report(args$output_dir, plot_paths, table_paths, args$name, performance_note)
-
-  plot_files <- list.files(plot_dir, pattern = "\\.png$", full.names = FALSE)
-  if (length(plot_files) > 0) {
-    old_wd <- getwd()
-    setwd(args$output_dir)
-    utils::tar(
-      "metric_plots.tar.gz",
-      files = file.path("plots", plot_files),
-      compression = "gzip"
+invoke_reviewer_figures <- function(input_root, output_dir) {
+  reviewer_script <- repository_script_path("reviewer_figures.R")
+  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+  status <- system2(
+    file.path(R.home("bin"), "Rscript"),
+    args = c(
+      shQuote(reviewer_script),
+      "--input-root",
+      shQuote(input_root),
+      "--output-dir",
+      shQuote(output_dir)
     )
-    setwd(old_wd)
+  )
+  if (status != 0) {
+    stop(sprintf("reviewer_figures.R exited with status %s", status))
   }
 }
 
-render_report <- function(output_dir, plot_paths, tables, name, performance_note = NULL) {
+render_report <- function(
+  output_dir,
+  plot_paths,
+  tables,
+  name,
+  performance_note = NULL,
+  artifact_paths = character()
+) {
   report_path <- file.path(output_dir, "metrics_report.Rmd")
   output_html <- file.path(output_dir, "metrics_report.html")
   plot_files <- unique(unlist(plot_paths, use.names = FALSE))
   plot_files <- plot_files[!is.na(plot_files) & plot_files != ""]
+  report_files <- unique(c(unlist(tables, use.names = FALSE), artifact_paths))
   if (!rmarkdown::pandoc_available()) {
     macro_table <- readr::read_tsv(
       file.path(output_dir, tables$macro_by_cv),
       show_col_types = FALSE
     )
     population_table <- readr::read_tsv(
-      file.path(output_dir, tables$weighted_by_cv),
+      file.path(output_dir, tables$per_population_by_cv),
+      show_col_types = FALSE
+    )
+    population_availability_table <- readr::read_tsv(
+      file.path(output_dir, tables$population_availability),
       show_col_types = FALSE
     )
     run_metrics_table <- readr::read_tsv(
@@ -1700,22 +2229,7 @@ render_report <- function(output_dir, plot_paths, tables, name, performance_note
       models = n_distinct(model),
       crossvalidations = n_distinct(crossvalidation)
     )
-    outputs <- data.frame(
-      file = c(
-        tables$macro_by_cv,
-        tables$weighted_by_cv,
-        tables$macro_summary,
-        tables$weighted_summary,
-        tables$run_metrics,
-        tables$per_population_summary,
-        tables$per_population_stability,
-        tables$per_population_confusion,
-        tables$rare_population,
-        tables$dataset_context,
-        tables$dominant_fnr,
-        tables$dominant_fpr
-      )
-    )
+    outputs <- data.frame(file = report_files)
     plot_html <- c()
     for (plot_file in plot_files) {
       if (file.exists(file.path(output_dir, plot_file))) {
@@ -1738,6 +2252,8 @@ render_report <- function(output_dir, plot_paths, tables, name, performance_note
       knitr::kable(macro_table, format = "html"),
       "<h2>Per-population Metrics By Crossvalidation</h2>",
       knitr::kable(population_table, format = "html"),
+      "<h2>Population Availability By Crossvalidation</h2>",
+      knitr::kable(population_availability_table, format = "html"),
       "<h2>Run-level Metrics</h2>",
       knitr::kable(run_metrics_table, format = "html"),
       "<h2>Per-population Summary</h2>",
@@ -1801,6 +2317,12 @@ render_report <- function(output_dir, plot_paths, tables, name, performance_note
     )
   }
 
+  output_file_lines <- sprintf(
+    "    '%s'%s",
+    report_files,
+    ifelse(seq_along(report_files) < length(report_files), ",", "")
+  )
+
   report_content <- c(
     "---",
     sprintf("title: \"Metrics Report - %s\"", name),
@@ -1821,7 +2343,11 @@ render_report <- function(output_dir, plot_paths, tables, name, performance_note
     "",
     "```{r}",
     sprintf("macro_table <- read_tsv('%s')", tables$macro_by_cv),
-    sprintf("population_table <- read_tsv('%s')", tables$weighted_by_cv),
+    sprintf("population_table <- read_tsv('%s')", tables$per_population_by_cv),
+    sprintf(
+      "population_availability_table <- read_tsv('%s')",
+      tables$population_availability
+    ),
     sprintf("run_metrics_table <- read_tsv('%s')", tables$run_metrics),
     sprintf(
       "per_population_summary_table <- read_tsv('%s')",
@@ -1863,6 +2389,12 @@ render_report <- function(output_dir, plot_paths, tables, name, performance_note
     "",
     "```{r}",
     "kable(population_table)",
+    "```",
+    "",
+    "## Population Availability By Crossvalidation",
+    "",
+    "```{r}",
+    "kable(population_availability_table)",
     "```",
     "",
     "## Run-level Metrics",
@@ -1923,18 +2455,7 @@ render_report <- function(output_dir, plot_paths, tables, name, performance_note
     "```{r}",
     "outputs <- data.frame(",
     "  file = c(",
-    sprintf("    '%s',", tables$macro_by_cv),
-    sprintf("    '%s',", tables$weighted_by_cv),
-    sprintf("    '%s',", tables$macro_summary),
-    sprintf("    '%s',", tables$weighted_summary),
-    sprintf("    '%s',", tables$run_metrics),
-    sprintf("    '%s',", tables$per_population_summary),
-    sprintf("    '%s',", tables$per_population_stability),
-    sprintf("    '%s',", tables$per_population_confusion),
-    sprintf("    '%s',", tables$rare_population),
-    sprintf("    '%s',", tables$dataset_context),
-    sprintf("    '%s',", tables$dominant_fnr),
-    sprintf("    '%s'", tables$dominant_fpr),
+    output_file_lines,
     "  )",
     ")",
     "kable(outputs)",
@@ -1959,14 +2480,29 @@ if (!dir.exists(args$output_dir)) {
   stop(sprintf("Output directory could not be created: %s", args$output_dir))
 }
 
-if (!is.null(args$existing_report_dir) && args$existing_report_dir != "") {
-  run_existing_report_mode(args)
-  quit(save = "no", status = 0)
-}
-
 input_paths <- expand_metric_inputs(unlist(args$metrics_scores))
 if (length(input_paths) == 0) {
   stop("No metrics files found for --metrics.scores")
+}
+missing_input_paths <- input_paths[!file.exists(input_paths)]
+if (length(missing_input_paths) > 0) {
+  stop(
+    sprintf(
+      "Metric files missing: %s",
+      paste(missing_input_paths, collapse = ", ")
+    )
+  )
+}
+input_paths <- normalizePath(input_paths, winslash = "/", mustWork = TRUE)
+if (length(input_paths) != EXPECTED_REQUESTED_RUNS || anyDuplicated(input_paths)) {
+  stop(
+    sprintf(
+      "Expected exactly %d unique input metric paths, got %d (%d unique).",
+      EXPECTED_REQUESTED_RUNS,
+      length(input_paths),
+      length(unique(input_paths))
+    )
+  )
 }
 
 order_paths <- normalize_paths(unlist(args$data_metadata))
@@ -1982,10 +2518,13 @@ if (length(missing_order_paths) > 0) {
     )
   )
 }
+order_paths <- normalizePath(order_paths, winslash = "/", mustWork = TRUE)
 order_map <- build_order_map(order_paths)
+metric_artifact_context <- build_metric_artifact_context(input_paths, order_paths)
 
 metrics_rows <- lapply(input_paths, collect_metrics)
 per_population_rows <- lapply(input_paths, collect_per_population)
+population_availability_rows <- lapply(input_paths, collect_population_availability)
 dataset_metadata <- collect_dataset_metadata(input_paths)
 metrics_df <- bind_rows(metrics_rows)
 metrics_df <- ensure_columns(
@@ -2021,9 +2560,24 @@ per_population_df <- ensure_columns(
     support = NA_real_
   )
 )
-if (nrow(metrics_df) == 0) {
-  stop("No metrics rows parsed from inputs")
+population_availability_df <- bind_rows(population_availability_rows)
+if (
+  nrow(metrics_df) != EXPECTED_REQUESTED_RUNS ||
+    any(metrics_df$run_id != "run0") ||
+    anyDuplicated(metrics_df$source_path)
+) {
+  stop(
+    paste0(
+      "Every input metric path must produce exactly one aggregate run0 row; got ",
+      nrow(metrics_df),
+      " rows from ",
+      length(input_paths),
+      " paths."
+    )
+  )
 }
+metrics_df <- metrics_df %>%
+  left_join(metric_artifact_context, by = "source_path")
 
 variant_lookup <- derive_model_variant_lookup(metrics_df)
 if (nrow(variant_lookup) > 0) {
@@ -2050,7 +2604,23 @@ if (nrow(variant_lookup) > 0) {
       model = coalesce(model.resolved, model)
     ) %>%
     select(-model_variant.resolved, -model.resolved)
+
+  population_availability_df <- population_availability_df %>%
+    left_join(
+      variant_lookup,
+      by = c("model_base", "model_params"),
+      suffix = c("", ".resolved")
+    ) %>%
+    mutate(
+      model_variant = coalesce(model_variant.resolved, model_variant),
+      model = coalesce(model.resolved, model)
+    ) %>%
+    select(-model_variant.resolved, -model.resolved)
 }
+
+metrics_df <- metrics_df %>% mutate(model = model_base)
+per_population_df <- per_population_df %>% mutate(model = model_base)
+population_availability_df <- population_availability_df %>% mutate(model = model_base)
 
 missing_datasets <- setdiff(unique(metrics_df$dataset), names(order_map))
 if (length(missing_datasets) > 0) {
@@ -2063,66 +2633,116 @@ if (length(missing_datasets) > 0) {
 }
 
 metrics_df <- metrics_df %>%
-  mutate(
-    dataset_root = dataset_root_from_path(source_path),
-    preprocessing_num = vapply(
-      seq_len(n()),
-      function(idx) {
-        read_preprocessing_num(dataset_root[[idx]], crossvalidation[[idx]])
-      },
-      integer(1)
-    ),
-    sample_count = vapply(
-      dataset,
-      function(item) {
-        if (is.na(item) || item == "") {
-          return(NA_integer_)
-        }
-        count <- order_map[[item]]
-        if (is.null(count)) {
-          return(NA_integer_)
-        }
-        count
-      },
-      integer(1)
-    ),
-    effective_crossvalidation = ifelse(
-      !is.na(preprocessing_num) & !is.na(sample_count),
-      sprintf("num-%d", ((preprocessing_num - 1) %% sample_count) + 1),
-      crossvalidation
-    )
-  )
+  mutate(effective_crossvalidation = sprintf("num-%d", effective_fold))
 
 per_population_df <- per_population_df %>%
-  mutate(
-    dataset_root = dataset_root_from_path(source_path),
-    preprocessing_num = vapply(
-      seq_len(n()),
-      function(idx) {
-        read_preprocessing_num(dataset_root[[idx]], crossvalidation[[idx]])
-      },
-      integer(1)
-    ),
-    sample_count = vapply(
-      dataset,
-      function(item) {
-        if (is.na(item) || item == "") {
-          return(NA_integer_)
-        }
-        count <- order_map[[item]]
-        if (is.null(count)) {
-          return(NA_integer_)
-        }
-        count
-      },
-      integer(1)
-    ),
-    effective_crossvalidation = ifelse(
-      !is.na(preprocessing_num) & !is.na(sample_count),
-      sprintf("num-%d", ((preprocessing_num - 1) %% sample_count) + 1),
-      crossvalidation
+  mutate(effective_crossvalidation = sprintf("num-%d", effective_fold))
+
+population_availability_df <- population_availability_df %>%
+  mutate(effective_crossvalidation = sprintf("num-%d", effective_fold))
+
+requested_metrics_df <- metrics_df
+
+requested_group_key <- c(
+  "dataset",
+  "model_base",
+  "model_params",
+  "stratification",
+  "stratification_hash",
+  "run_id"
+)
+requested_key <- c(requested_group_key, "requested_fold")
+requested_groups <- metrics_df %>%
+  group_by(across(all_of(requested_group_key))) %>%
+  summarize(
+    requested_count = n(),
+    requested_folds = paste(sort(requested_fold), collapse = ","),
+    .groups = "drop"
+  )
+if (
+  n_distinct(metrics_df$dataset) != EXPECTED_DATASET_PARAMETERIZATIONS ||
+    nrow(requested_groups) != EXPECTED_REQUESTED_GROUPS ||
+    any(requested_groups$requested_count != 5L) ||
+    any(requested_groups$requested_folds != "1,2,3,4,5") ||
+    anyDuplicated(metrics_df[requested_key])
+) {
+  stop(
+    paste0(
+      "Requested-run matrix is not the complete 16-dataset x 6-model x ",
+      "3-stratification x 5-fold design."
     )
   )
+}
+
+effective_key <- c(
+  "dataset",
+  "model_base",
+  "model_params",
+  "stratification",
+  "stratification_hash",
+  "run_id",
+  "effective_crossvalidation"
+)
+assert_alias_values_equal(
+  metrics_df,
+  effective_key,
+  c(
+    "dataset_name", "dataset_sub_sampling", "f1_macro", "precision_macro",
+    "recall_macro", "balanced_accuracy", "accuracy", "mcc", "pop_freq_corr",
+    "overlap", "f1_weighted", "precision_weighted", "recall_weighted", "n_cells",
+    "n_cells_total", "n_truth_positive", "n_truth_zero",
+    "n_pred_zero_on_truth_positive", "rejection_rate_on_truth_positive",
+    "n_pred_zero_on_truth_zero", "n_pred_missing_mapped_to_zero"
+  ),
+  "aggregate metrics"
+)
+per_population_alias_sets <- per_population_df %>%
+  group_by(across(all_of(c(effective_key, "requested_fold")))) %>%
+  summarize(
+    population_count = n(),
+    population_ids = paste(sort(unique(population_id)), collapse = ","),
+    .groups = "drop"
+  )
+assert_alias_values_equal(
+  per_population_alias_sets,
+  effective_key,
+  c("population_count", "population_ids"),
+  "per-population row sets"
+)
+assert_alias_values_equal(
+  per_population_df,
+  c(effective_key, "population_id"),
+  c(
+    "dataset_name", "dataset_sub_sampling", "population_name", "population",
+    "f1", "precision", "recall", "accuracy", "tp", "fp", "fn", "tn",
+    "support", "nominal_train_count", "training_support", "present_in_training",
+    "test_truth_count"
+  ),
+  "per-population metrics"
+)
+availability_alias_sets <- population_availability_df %>%
+  group_by(across(all_of(c(effective_key, "requested_fold")))) %>%
+  summarize(
+    population_count = n(),
+    population_ids = paste(sort(unique(population_id)), collapse = ","),
+    .groups = "drop"
+  )
+assert_alias_values_equal(
+  availability_alias_sets,
+  effective_key,
+  c("population_count", "population_ids"),
+  "population-availability row sets"
+)
+assert_alias_values_equal(
+  population_availability_df,
+  c(effective_key, "population_id"),
+  c(
+    "dataset_name", "dataset_sub_sampling", "population_name",
+    "nominal_train_count", "training_support", "present_in_training",
+    "test_truth_count"
+  ),
+  "population availability"
+)
 
 deduped_metrics <- metrics_df %>%
   distinct(
@@ -2130,10 +2750,21 @@ deduped_metrics <- metrics_df %>%
     model_base,
     model_params,
     stratification,
+    stratification_hash,
     run_id,
     effective_crossvalidation,
     .keep_all = TRUE
   )
+wrapped_alias_count <- nrow(metrics_df) - nrow(deduped_metrics)
+if (wrapped_alias_count != EXPECTED_WRAPPED_ALIASES) {
+  stop(
+    sprintf(
+      "Expected exactly %d wrapped aliases, found %d.",
+      EXPECTED_WRAPPED_ALIASES,
+      wrapped_alias_count
+    )
+  )
+}
 if (nrow(deduped_metrics) < nrow(metrics_df)) {
   warning(
     sprintf(
@@ -2146,7 +2777,49 @@ if (nrow(deduped_metrics) < nrow(metrics_df)) {
 
 metrics_df <- deduped_metrics %>%
   mutate(crossvalidation = effective_crossvalidation) %>%
-  select(-effective_crossvalidation, -dataset_root, -preprocessing_num, -sample_count)
+  select(-effective_crossvalidation)
+
+effective_model_counts <- table(metrics_df$model_base)
+effective_stratifications <- metrics_df %>%
+  distinct(stratification, stratification_hash)
+effective_groups <- metrics_df %>%
+  group_by(
+    dataset,
+    dataset_name,
+    model_base,
+    model_params,
+    stratification,
+    stratification_hash,
+    run_id
+  ) %>%
+  summarize(effective_count = n(), .groups = "drop")
+if (
+  nrow(metrics_df) != EXPECTED_EFFECTIVE_RUNS ||
+    !setequal(unique(metrics_df$model_base), EXPECTED_MODELS) ||
+    !isTRUE(all(effective_model_counts[EXPECTED_MODELS] == EXPECTED_RUNS_PER_MODEL)) ||
+    !setequal(unique(metrics_df$stratification), EXPECTED_STRATIFICATIONS) ||
+    nrow(effective_stratifications) != length(EXPECTED_STRATIFICATIONS) ||
+    anyDuplicated(effective_stratifications$stratification) ||
+    anyDuplicated(effective_stratifications$stratification_hash) ||
+    nrow(effective_groups) != EXPECTED_REQUESTED_GROUPS ||
+    any(
+      effective_groups$effective_count !=
+        ifelse(effective_groups$dataset_name == "Levine", 2L, 5L)
+    )
+) {
+  stop(
+    sprintf(
+      paste0(
+        "Effective-run validation failed: rows=%d, models={%s}, ",
+        "per-model={%s}, stratifications={%s}."
+      ),
+      nrow(metrics_df),
+      paste(sort(unique(metrics_df$model_base)), collapse = ","),
+      paste(effective_model_counts, collapse = ","),
+      paste(sort(unique(metrics_df$stratification)), collapse = ",")
+    )
+  )
+}
 
 per_population_df <- per_population_df %>%
   distinct(
@@ -2154,13 +2827,75 @@ per_population_df <- per_population_df %>%
     model_base,
     model_params,
     stratification,
+    stratification_hash,
     run_id,
     effective_crossvalidation,
     population_id,
     .keep_all = TRUE
   ) %>%
   mutate(crossvalidation = effective_crossvalidation) %>%
-  select(-effective_crossvalidation, -dataset_root, -preprocessing_num, -sample_count)
+  select(-effective_crossvalidation)
+
+population_availability_df <- population_availability_df %>%
+  distinct(
+    dataset,
+    model_base,
+    model_params,
+    stratification,
+    stratification_hash,
+    run_id,
+    effective_crossvalidation,
+    population_id,
+    .keep_all = TRUE
+  ) %>%
+  mutate(crossvalidation = effective_crossvalidation) %>%
+  select(-effective_crossvalidation) %>%
+  group_by(
+    dataset,
+    model,
+    stratification,
+    stratification_hash,
+    crossvalidation,
+    run_id
+  ) %>%
+  mutate(
+    eligible_test_count = sum(test_truth_count[test_truth_count > 0]),
+    test_support_fraction = ifelse(
+      eligible_test_count > 0,
+      test_truth_count / eligible_test_count,
+      NA_real_
+    )
+  ) %>%
+  ungroup()
+
+per_population_df <- per_population_df %>%
+  left_join(
+    population_availability_df %>%
+      distinct(
+        dataset,
+        model,
+        stratification,
+        stratification_hash,
+        crossvalidation,
+        run_id,
+        eligible_test_count
+      ),
+    by = c(
+      "dataset",
+      "model",
+      "stratification",
+      "stratification_hash",
+      "crossvalidation",
+      "run_id"
+    )
+  ) %>%
+  mutate(
+    test_support_fraction = ifelse(
+      !is.na(test_truth_count) & eligible_test_count > 0,
+      test_truth_count / eligible_test_count,
+      NA_real_
+    )
+  )
 
 per_population_df <- per_population_df %>%
   left_join(
@@ -2172,6 +2907,7 @@ per_population_df <- per_population_df %>%
         model_variant,
         model_params,
         stratification,
+        stratification_hash,
         crossvalidation,
         run_id,
         n_cells_total,
@@ -2187,7 +2923,17 @@ per_population_df <- per_population_df %>%
         runtime_seconds,
         scalability_seconds_per_item
       ),
-    by = c("dataset", "model", "model_base", "model_variant", "model_params", "stratification", "crossvalidation", "run_id")
+    by = c(
+      "dataset",
+      "model",
+      "model_base",
+      "model_variant",
+      "model_params",
+      "stratification",
+      "stratification_hash",
+      "crossvalidation",
+      "run_id"
+    )
   )
 
 macro_table <- metrics_df %>%
@@ -2195,6 +2941,7 @@ macro_table <- metrics_df %>%
     dataset,
     model,
     stratification,
+    stratification_hash,
     crossvalidation,
     run_id,
     n_cells_total,
@@ -2207,11 +2954,14 @@ macro_table <- metrics_df %>%
   arrange(dataset, model, crossvalidation, run_id)
 
 per_population_table <- per_population_df %>%
-  mutate(support_fraction = ifelse(n_cells > 0, support / n_cells, NA_real_)) %>%
+  mutate(
+    rare_bucket = vapply(test_support_fraction, bucket_support_fraction, character(1))
+  ) %>%
   select(
     dataset,
     model,
     stratification,
+    stratification_hash,
     crossvalidation,
     run_id,
     population_id,
@@ -2222,14 +2972,40 @@ per_population_table <- per_population_df %>%
     recall,
     accuracy,
     support,
+    nominal_train_count,
+    training_support,
+    present_in_training,
+    test_truth_count,
+    eligible_test_count,
+    test_support_fraction,
+    rare_bucket,
     n_cells,
-    support_fraction,
+    source_path,
     tp,
     fp,
     fn,
     tn
   ) %>%
   arrange(dataset, model, crossvalidation, run_id, population)
+
+population_availability_table <- population_availability_df %>%
+  select(
+    dataset,
+    model,
+    stratification,
+    stratification_hash,
+    crossvalidation,
+    run_id,
+    population_id,
+    population_name,
+    nominal_train_count,
+    training_support,
+    present_in_training,
+    test_truth_count,
+    eligible_test_count,
+    test_support_fraction
+  ) %>%
+  arrange(dataset, model, crossvalidation, run_id, population_id)
 
 run_metrics_table <- metrics_df %>%
   mutate(
@@ -2243,6 +3019,7 @@ run_metrics_table <- metrics_df %>%
     dataset,
     model,
     stratification,
+    stratification_hash,
     crossvalidation,
     run_id,
     n_cells,
@@ -2266,7 +3043,8 @@ run_metrics_table <- metrics_df %>%
     overlap,
     runtime_seconds,
     scalability_seconds_per_item,
-    throughput_events_per_sec
+    throughput_events_per_sec,
+    source_path
   ) %>%
   arrange(dataset, model, crossvalidation, run_id)
 
@@ -2337,26 +3115,40 @@ per_population_confusion <- per_population_df %>%
   arrange(dataset, model, crossvalidation, run_id, population)
 
 rare_population_table <- per_population_df %>%
-  mutate(support_fraction = ifelse(n_cells > 0, support / n_cells, NA_real_)) %>%
-  mutate(rare_bucket = vapply(support_fraction, bucket_support_fraction, character(1))) %>%
-  group_by(dataset, model, stratification, crossvalidation, run_id, rare_bucket) %>%
+  filter(!is.na(test_truth_count)) %>%
+  mutate(
+    rare_bucket = vapply(test_support_fraction, bucket_support_fraction, character(1))
+  ) %>%
+  group_by(
+    dataset,
+    model,
+    stratification,
+    crossvalidation,
+    run_id,
+    present_in_training,
+    rare_bucket
+  ) %>%
   summarize(
     n_populations = n(),
     median_f1 = median(f1, na.rm = TRUE),
     median_precision = median(precision, na.rm = TRUE),
     median_recall = median(recall, na.rm = TRUE),
-    total_support = sum(support, na.rm = TRUE),
-    n_cells = ifelse(
-      all(is.na(n_cells)),
+    nominal_train_count = sum(nominal_train_count),
+    training_support = sum(training_support),
+    test_truth_count = sum(test_truth_count),
+    eligible_test_count = ifelse(
+      all(is.na(eligible_test_count)),
       NA_real_,
-      max(n_cells, na.rm = TRUE)
-    ),
-    support_share = ifelse(
-      !all(is.na(n_cells)) && max(n_cells, na.rm = TRUE) > 0,
-      sum(support, na.rm = TRUE) / max(n_cells, na.rm = TRUE),
-      NA_real_
+      max(eligible_test_count, na.rm = TRUE)
     ),
     .groups = "drop"
+  ) %>%
+  mutate(
+    test_support_fraction = ifelse(
+      eligible_test_count > 0,
+      test_truth_count / eligible_test_count,
+      NA_real_
+    )
   )
 
 dataset_context_table <- per_population_df %>%
@@ -2423,10 +3215,17 @@ weighted_summary <- metrics_df %>%
   )
 
 macro_table_path <- file.path(args$output_dir, "f1_macro_by_crossvalidation.tsv")
-weighted_table_path <- file.path(args$output_dir, "f1_weighted_by_crossvalidation.tsv")
+per_population_table_path <- file.path(
+  args$output_dir,
+  "per_population_by_crossvalidation.tsv"
+)
 macro_summary_path <- file.path(args$output_dir, "f1_macro_summary_by_model.tsv")
 weighted_summary_path <- file.path(args$output_dir, "f1_weighted_summary_by_model.tsv")
 run_metrics_path <- file.path(args$output_dir, "run_metrics.tsv")
+population_availability_path <- file.path(
+  args$output_dir,
+  "population_availability_by_crossvalidation.tsv"
+)
 per_population_summary_path <- file.path(
   args$output_dir,
   "per_population_summary.tsv"
@@ -2446,10 +3245,11 @@ dominant_fpr_path <- file.path(args$output_dir, "dominant_errors_fpr.tsv")
 dataset_metadata_path <- file.path(args$output_dir, "dataset_metadata.json")
 
 write_table(macro_table, macro_table_path)
-write_table(per_population_table, weighted_table_path)
+write_table(per_population_table, per_population_table_path)
 write_table(macro_summary, macro_summary_path)
 write_table(weighted_summary, weighted_summary_path)
 write_table(run_metrics_table, run_metrics_path)
+write_table(population_availability_table, population_availability_path)
 write_table(per_population_summary, per_population_summary_path)
 write_table(per_population_stability, per_population_stability_path)
 write_table(per_population_confusion, per_population_confusion_path)
@@ -2464,45 +3264,106 @@ jsonlite::write_json(
   pretty = TRUE
 )
 
+finalization <- build_finalization_outputs(
+  requested_metrics_df,
+  metrics_df,
+  args$output_dir
+)
+
 plot_dir <- file.path(args$output_dir, "plots")
 reset_plot_dir(plot_dir)
 
-plot_paths <- generate_plots2_suite(
-  plot_dir = plot_dir,
-  metrics_df = metrics_df,
-  per_population_confusion = per_population_confusion,
-  run_metrics_table = run_metrics_table,
-  dataset_metadata = dataset_metadata
+reviewer_dir <- file.path(plot_dir, "reviewer")
+reviewer_error <- NULL
+tryCatch(
+  invoke_reviewer_figures(args$output_dir, reviewer_dir),
+  error = function(error) {
+    reviewer_error <<- error
+  }
 )
-if (length(plot_paths) == 0) {
-  plot_paths <- list()
+unlink(finalization$paths$collector_validation)
+if (!is.null(reviewer_error)) {
+  stop(reviewer_error)
 }
+reviewer_files <- list.files(
+  reviewer_dir,
+  recursive = TRUE,
+  full.names = FALSE,
+  all.files = TRUE,
+  no.. = TRUE
+)
+reviewer_artifacts <- file.path("plots", "reviewer", reviewer_files)
+plot_paths <- as.list(
+  reviewer_artifacts[grepl("\\.png$", reviewer_artifacts, ignore.case = TRUE)]
+)
 
 table_paths <- list(
   macro_by_cv = basename(macro_table_path),
-  weighted_by_cv = basename(weighted_table_path),
+  per_population_by_cv = basename(per_population_table_path),
   macro_summary = basename(macro_summary_path),
   weighted_summary = basename(weighted_summary_path),
   run_metrics = basename(run_metrics_path),
+  population_availability = basename(population_availability_path),
   per_population_summary = basename(per_population_summary_path),
   per_population_stability = basename(per_population_stability_path),
   per_population_confusion = basename(per_population_confusion_path),
   rare_population = basename(rare_population_path),
   dataset_context = basename(dataset_context_path),
   dominant_fnr = basename(dominant_fnr_path),
-  dominant_fpr = basename(dominant_fpr_path)
+  dominant_fpr = basename(dominant_fpr_path),
+  accepted_manifest = basename(finalization$paths$accepted_manifest),
+  run_status = basename(finalization$paths$run_status),
+  model_wall_times = basename(finalization$paths$model_wall_times),
+  collector_validation = basename(finalization$paths$collector_validation)
 )
 
-render_report(args$output_dir, plot_paths, table_paths, args$name)
+artifact_paths <- unique(c(
+  basename(unlist(table_paths, use.names = FALSE)),
+  basename(dataset_metadata_path),
+  basename(unlist(finalization$paths, use.names = FALSE)),
+  reviewer_artifacts
+))
+render_report(
+  args$output_dir,
+  plot_paths,
+  table_paths,
+  args$name,
+  artifact_paths = artifact_paths
+)
 
-plot_files <- list.files(plot_dir, pattern = "\\.png$", full.names = FALSE)
-if (length(plot_files) > 0) {
-  old_wd <- getwd()
-  setwd(args$output_dir)
-  utils::tar(
-    "metric_plots.tar.gz",
-    files = file.path("plots", plot_files),
-    compression = "gzip"
+old_wd <- getwd()
+write_collector_validation(
+  finalization$validation,
+  finalization$paths$collector_validation
+)
+tar_error <- NULL
+tar_status <- tryCatch(
+  {
+    setwd(args$output_dir)
+    utils::tar(
+      "metric_plots.tar.gz",
+      files = artifact_paths,
+      compression = "gzip"
+    )
+  },
+  error = function(error) {
+    tar_error <<- error
+    NA_integer_
+  },
+  finally = setwd(old_wd)
+)
+archive_path <- file.path(args$output_dir, "metric_plots.tar.gz")
+if (!is.null(tar_error) || is.na(tar_status) || tar_status != 0L || !file.exists(archive_path)) {
+  unlink(c(finalization$paths$collector_validation, archive_path))
+  stop(
+    sprintf(
+      "Failed to create complete metric plot archive%s",
+      if (is.null(tar_error)) "" else paste0(": ", tar_error$message)
+    )
   )
-  setwd(old_wd)
+}
+archive_members <- utils::untar(archive_path, list = TRUE)
+if (!setequal(archive_members, artifact_paths)) {
+  unlink(c(finalization$paths$collector_validation, archive_path))
+  stop("metric_plots.tar.gz members do not match the validated artifact set")
 }

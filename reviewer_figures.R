@@ -8,14 +8,10 @@ suppressPackageStartupMessages({
   library(tidyr)
 })
 
-published_collector_commit <- "116369c449904ce5c81e75a07ec29fcb8c601a6d"
-
 model_display_map <- c(
   "cyanno" = "CyAnno",
   "cygate" = "CyGATE",
   "dgcytof" = "DGCyTOF",
-  "gatemeclass[E]" = "GateMeClass (E)",
-  "gatemeclass[V]" = "GateMeClass (V)",
   "knn" = "KNN",
   "lda" = "LDA",
   "random" = "Random"
@@ -36,6 +32,9 @@ metric_display_map <- c(
   "recall_weighted" = "Support-weighted recall = overall accuracy"
 )
 
+rare_bucket_levels <- c("<1%", "1-5%")
+minimum_violin_observations <- 3L
+
 assert_true <- function(condition, message) {
   if (!isTRUE(condition)) {
     stop(message, call. = FALSE)
@@ -52,11 +51,11 @@ parse_args <- function(args) {
   }
   defaults <- list(
     input_root = normalizePath(
-      file.path(dirname(script_path), "..", "out", "controlled", "reviewer-metrics"),
+      file.path(dirname(script_path), "out"),
       mustWork = FALSE
     ),
     output_dir = normalizePath(
-      file.path(dirname(script_path), "..", "out", "controlled", "reviewer-metrics", "figures"),
+      file.path(dirname(script_path), "out", "plots", "reviewer"),
       mustWork = FALSE
     ),
     clean = FALSE
@@ -102,6 +101,69 @@ read_tsv_required <- function(path, columns) {
   data
 }
 
+read_json_required <- function(path, simplify = TRUE) {
+  assert_true(file.exists(path), sprintf("Required input not found: %s", path))
+  jsonlite::read_json(path, simplifyVector = simplify)
+}
+
+manifest_scalar <- function(record, field) {
+  value <- record[[field]]
+  assert_true(
+    !is.null(value) && !is.list(value) && length(value) == 1 && !is.na(value),
+    sprintf("Accepted manifest field %s must be a non-missing scalar", field)
+  )
+  value
+}
+
+read_accepted_manifest <- function(path) {
+  assert_true(file.exists(path), sprintf("Required input not found: %s", path))
+  lines <- readLines(path, warn = FALSE, encoding = "UTF-8")
+  lines <- lines[nzchar(trimws(lines))]
+  assert_true(length(lines) > 0, "Accepted manifest is empty")
+  records <- lapply(lines, jsonlite::fromJSON, simplifyVector = TRUE)
+  fields <- c(
+    "dataset", "collector_dataset_identity", "dataset_sub_sampling", "model",
+    "stratification", "stratification_hash", "effective_fold", "metric_path"
+  )
+
+  bind_rows(lapply(records, function(record) {
+    values <- lapply(fields, function(field) manifest_scalar(record, field))
+    names(values) <- fields
+    tibble(
+      dataset = as.character(values$dataset),
+      collector_dataset_identity = as.character(values$collector_dataset_identity),
+      dataset_sub_sampling = as.character(values$dataset_sub_sampling),
+      model = as.character(values$model),
+      stratification = as.character(values$stratification),
+      stratification_hash = as.character(values$stratification_hash),
+      effective_fold = as.integer(values$effective_fold),
+      metric_path = as.character(values$metric_path)
+    )
+  }))
+}
+
+normalize_absolute_metric_paths <- function(paths) {
+  paths <- as.character(paths)
+  assert_true(all(!is.na(paths) & nzchar(trimws(paths))), "A metric source path is missing")
+  assert_true(all(startsWith(paths, "/")), "Metric source paths must be absolute")
+  vapply(
+    paths,
+    normalizePath,
+    character(1),
+    winslash = "/",
+    mustWork = FALSE
+  )
+}
+
+normalize_logical <- function(value, column) {
+  normalized <- tolower(trimws(as.character(value)))
+  assert_true(
+    all(!is.na(value) & normalized %in% c("true", "false")),
+    sprintf("%s must contain only TRUE or FALSE", column)
+  )
+  normalized == "true"
+}
+
 short_count <- function(value) {
   number <- suppressWarnings(as.numeric(value))
   if (is.na(number)) {
@@ -113,8 +175,17 @@ short_count <- function(value) {
   format(number, scientific = FALSE, trim = TRUE)
 }
 
-add_display_fields <- function(data) {
-  dataset_labels <- data %>%
+add_manifest_display_fields <- function(manifest) {
+  assert_true(
+    setequal(unique(manifest$model), names(model_display_map)),
+    "Accepted manifest does not contain the canonical six models"
+  )
+  assert_true(
+    setequal(unique(manifest$stratification), names(stratification_display_map)),
+    "Accepted manifest does not contain the canonical three stratifications"
+  )
+
+  dataset_labels <- manifest %>%
     distinct(collector_dataset_identity, dataset, dataset_sub_sampling) %>%
     arrange(dataset, suppressWarnings(as.numeric(dataset_sub_sampling))) %>%
     mutate(
@@ -124,238 +195,343 @@ add_display_fields <- function(data) {
         dataset
       )
     )
-
-  assert_true(!anyDuplicated(dataset_labels$dataset_display), "Dataset display labels are not unique")
   assert_true(
-    all(unique(data$collector_model) %in% names(model_display_map)),
-    "The model display-name map is incomplete"
-  )
-  assert_true(
-    all(unique(data$stratification) %in% names(stratification_display_map)),
-    "The stratification display-name map is incomplete"
+    !anyDuplicated(dataset_labels$collector_dataset_identity) &&
+      !anyDuplicated(dataset_labels$dataset_display),
+    "Accepted manifest dataset display mappings are not unique"
   )
 
-  data %>%
-    left_join(dataset_labels, by = c("collector_dataset_identity", "dataset", "dataset_sub_sampling")) %>%
+  manifest %>%
+    left_join(
+      dataset_labels,
+      by = c("collector_dataset_identity", "dataset", "dataset_sub_sampling")
+    ) %>%
     mutate(
-      model_display = unname(model_display_map[collector_model]),
-      stratification_display = unname(stratification_display_map[stratification]),
       dataset_display = factor(dataset_display, levels = dataset_labels$dataset_display),
-      model_display = factor(model_display, levels = unname(model_display_map)),
+      model_display = factor(
+        unname(model_display_map[model]),
+        levels = unname(model_display_map)
+      ),
       stratification_display = factor(
-        stratification_display,
+        unname(stratification_display_map[stratification]),
         levels = unname(stratification_display_map)
       )
     )
 }
 
+filter_rare_population <- function(data) {
+  data %>%
+    filter(
+      rare_bucket %in% rare_bucket_levels,
+      is.finite(f1),
+      is.finite(recall),
+      test_truth_count > 0,
+      eligible_test_count > 0,
+      is.finite(test_support_fraction),
+      test_support_fraction > 0
+    )
+}
+
 prepare_data <- function(input_root) {
   paths <- list(
-    run_metrics = file.path(input_root, "collector-report", "run_metrics.tsv"),
-    events = file.path(input_root, "supplementary", "run-level-rejection-events.tsv"),
-    summary = file.path(
-      input_root,
-      "supplementary",
-      "rejection-summary-by-dataset-model-parameters-stratification.tsv"
-    ),
-    missing = file.path(input_root, "missing-coverage.tsv"),
-    collector_status = file.path(input_root, "collector-status.json"),
-    validation_status = file.path(input_root, "supplementary", "validation-status.json")
+    collector_validation = file.path(input_root, "collector-validation-status.json"),
+    accepted_manifest = file.path(input_root, "accepted-manifest.jsonl"),
+    run_status = file.path(input_root, "run-status.tsv"),
+    run_metrics = file.path(input_root, "run_metrics.tsv"),
+    per_population = file.path(input_root, "per_population_by_crossvalidation.tsv"),
+    dataset_metadata = file.path(input_root, "dataset_metadata.json")
+  )
+  collector_validation <- read_json_required(paths$collector_validation)
+  dataset_metadata <- read_json_required(paths$dataset_metadata, simplify = FALSE)
+  manifest <- read_accepted_manifest(paths$accepted_manifest)
+  checks <- list()
+
+  checks$collector_validation_pass_and_complete <- assert_true(
+    identical(collector_validation$status, "PASS") &&
+      !is.null(collector_validation$counts$effective) &&
+      as.integer(collector_validation$counts$effective) == 1386L,
+    "Collector validation must be PASS with exactly 1386 effective runs"
+  )
+  checks$dataset_metadata_present <- assert_true(
+    is.list(dataset_metadata) && length(dataset_metadata) > 0,
+    "Collector dataset metadata is empty or invalid"
+  )
+  manifest_key <- c(
+    "collector_dataset_identity", "model", "stratification_hash", "effective_fold"
+  )
+  checks$manifest_keys_valid <- assert_true(
+    nrow(manifest) > 0 &&
+      all(is.finite(manifest$effective_fold) & manifest$effective_fold > 0) &&
+      all(complete.cases(manifest[manifest_key])) &&
+      !anyDuplicated(manifest[manifest_key]) &&
+      !anyDuplicated(manifest$metric_path),
+    "Accepted manifest has missing or duplicate effective-run keys or metric paths"
+  )
+  checks$collector_effective_count_reconciled <- assert_true(
+    nrow(manifest) == 1386L,
+    "Accepted manifest must contain exactly 1386 effective runs"
+  )
+
+  manifest <- manifest %>%
+    mutate(
+      normalized_metric_path = normalize_absolute_metric_paths(metric_path)
+    ) %>%
+    add_manifest_display_fields()
+  checks$normalized_manifest_paths_unique <- assert_true(
+    !anyDuplicated(manifest$normalized_metric_path),
+    "Accepted manifest metric paths are not unique after normalization"
+  )
+
+  run_status <- read_tsv_required(
+    paths$run_status,
+    c(
+      "collector_dataset_identity", "dataset", "dataset_sub_sampling", "model",
+      "requested_fold", "effective_fold", "stratification", "stratification_hash",
+      "status"
+    )
+  ) %>%
+    transmute(
+      collector_dataset_identity = as.character(collector_dataset_identity),
+      dataset = as.character(dataset),
+      dataset_sub_sampling = as.character(dataset_sub_sampling),
+      model = as.character(model),
+      requested_fold = as.integer(requested_fold),
+      effective_fold = as.integer(effective_fold),
+      stratification = as.character(stratification),
+      stratification_hash = as.character(stratification_hash),
+      status = as.character(status)
+    )
+  requested_group_key <- c(
+    "collector_dataset_identity", "model", "stratification_hash"
+  )
+  requested_groups <- run_status %>%
+    group_by(across(all_of(requested_group_key))) %>%
+    summarize(
+      requested_count = n(),
+      requested_folds = paste(sort(requested_fold), collapse = ","),
+      .groups = "drop"
+    )
+  checks$run_status_complete <- assert_true(
+    nrow(run_status) == 1440L &&
+      all(run_status$status == "completed") &&
+      nrow(requested_groups) == 288L &&
+      all(requested_groups$requested_count == 5L) &&
+      all(requested_groups$requested_folds == "1,2,3,4,5"),
+    "run-status.tsv does not contain the complete requested benchmark matrix"
   )
 
   run_metrics <- read_tsv_required(
     paths$run_metrics,
     c(
-      "dataset", "model", "stratification", "crossvalidation", "run_id",
-      names(metric_display_map), "balanced_accuracy", "accuracy"
+      "source_path", "run_id", names(metric_display_map), "balanced_accuracy", "accuracy",
+      "n_truth_positive", "n_pred_zero_on_truth_positive",
+      "rejection_rate_on_truth_positive"
     )
-  )
-  events <- read_tsv_required(
-    paths$events,
-    c(
-      "collector_dataset_identity", "collector_model", "stratification",
-      "stratification_hash", "effective_fold", "metric_run_id", "completion_status",
-      "collector_commit", "spectral_artifact_status"
-    )
-  )
-  summary <- read_tsv_required(
-    paths$summary,
-    c(
-      "dataset", "collector_dataset_identity", "dataset_sub_sampling",
-      "collector_model", "stratification", "expected_effective_case_count",
-      "completed_case_count", "missing_not_run_case_count",
-      "missing_configured_case_count", "coverage_fraction", "coverage_status",
-      "missing_source_status_counts", "summed_rejected_prediction_events",
-      "summed_truth_positive_denominator", "event_weighted_rejection_rate"
-    )
-  )
-  missing <- read_tsv_required(
-    paths$missing,
-    c("dataset", "model", "gmm_parameterization", "source_status", "stratification")
-  )
-  collector_status <- jsonlite::read_json(paths$collector_status, simplifyVector = TRUE)
-  validation_status <- jsonlite::read_json(paths$validation_status, simplifyVector = TRUE)
-
-  checks <- list()
-  checks$collector_status_pass <- assert_true(
-    identical(collector_status$status, "PASS"),
-    "Collector status is not PASS"
-  )
-  checks$supplementary_status_ready <- assert_true(
-    isTRUE(validation_status$ready_for_figure_generation) &&
-      all(unlist(validation_status$assertions, use.names = FALSE)),
-    "Supplementary validation is not ready for figure generation"
-  )
-  checks$published_collector_commit_exact <- assert_true(
-    identical(collector_status$collector_commit, published_collector_commit) &&
-      identical(validation_status$collector_commit, published_collector_commit) &&
-      all(events$collector_commit == published_collector_commit),
-    "Input collector commit does not match the published commit"
-  )
-  checks$published_run_metrics_sha256_exact <- assert_true(
-    identical(sha256_file(paths$run_metrics), collector_status$outputs$run_metrics$sha256),
-    "run_metrics.tsv does not match its published SHA-256"
-  )
-  checks$metric_equalities_exact <- assert_true(
-    all(run_metrics$recall_macro == run_metrics$balanced_accuracy) &&
-      all(run_metrics$recall_weighted == run_metrics$accuracy),
-    "Documented recall equalities do not hold exactly"
-  )
-  checks$three_stratifications_retained <- assert_true(
-    setequal(unique(summary$stratification), names(stratification_display_map)),
-    "The full three-stratification matrix is not present"
-  )
-  checks$gatemeclass_variants_distinct <- assert_true(
-    all(c("gatemeclass[E]", "gatemeclass[V]") %in% summary$collector_model),
-    "GateMeClass E and V are not both present"
-  )
-  checks$corrected_spectral_only <- assert_true(
-    setequal(unique(events$spectral_artifact_status), c("corrected_cohort", "not_applicable")) &&
-      sum(events$spectral_artifact_status == "corrected_cohort") ==
-        validation_status$counts$corrected_spectral_source_rows,
-    "Obsolete or unexpected spectral artifacts are present"
-  )
-  checks$missing_coverage_reconciled <- assert_true(
-    nrow(missing) == validation_status$counts$configured_missing_gatemeclass_rows &&
-      sum(summary$missing_configured_case_count) == nrow(missing) &&
-      sum(summary$missing_not_run_case_count) ==
-        validation_status$counts$missing_not_run_effective_cases,
-    "Missing coverage does not reconcile"
-  )
-
-  run_metrics <- run_metrics %>%
-    mutate(effective_fold = as.integer(sub("^num-", "", crossvalidation)))
-  run_key <- c("dataset", "model", "stratification", "effective_fold", "run_id")
-  event_key <- c(
-    "collector_dataset_identity", "collector_model", "stratification_hash",
-    "effective_fold", "metric_run_id"
-  )
-  checks$completed_keys_unique <- assert_true(
-    !anyDuplicated(run_metrics[run_key]) && !anyDuplicated(events[event_key]),
-    "Completed run keys are not unique"
-  )
-
-  event_keys <- events %>%
+  ) %>%
     transmute(
-      collector_dataset_identity,
-      collector_model,
-      stratification_name = stratification,
-      stratification_hash,
-      effective_fold,
-      metric_run_id,
-      completion_status
-    )
-  completed <- run_metrics %>%
-    inner_join(
-      event_keys,
-      by = c(
-        "dataset" = "collector_dataset_identity",
-        "model" = "collector_model",
-        "stratification" = "stratification_hash",
-        "effective_fold",
-        "run_id" = "metric_run_id"
+      collector_source_path = as.character(source_path),
+      normalized_metric_path = normalize_absolute_metric_paths(source_path),
+      run_id = as.character(run_id),
+      across(
+        all_of(
+          c(
+            names(metric_display_map), "balanced_accuracy", "accuracy",
+            "n_truth_positive", "n_pred_zero_on_truth_positive",
+            "rejection_rate_on_truth_positive"
+          )
+        ),
+        as.numeric
       )
     )
-  checks$all_completed_rows_joined <- assert_true(
-    nrow(completed) == nrow(run_metrics) &&
-      nrow(completed) == nrow(events) &&
-      all(completed$completion_status == "completed_valid"),
-    "Completed metrics and rejection-event rows do not join one-to-one"
+  checks$run_metrics_match_manifest <- assert_true(
+    nrow(run_metrics) == nrow(manifest) &&
+      !anyDuplicated(run_metrics$normalized_metric_path) &&
+      setequal(run_metrics$normalized_metric_path, manifest$normalized_metric_path) &&
+      all(run_metrics$run_id == "run0"),
+    "run_metrics.tsv does not map one-to-one to accepted manifest records"
   )
 
-  metric_columns <- names(metric_display_map)
-  aggregate_metrics <- completed %>%
-    group_by(
-      collector_dataset_identity = dataset,
-      collector_model = model,
-      stratification = stratification_name
+  accepted_runs <- manifest %>%
+    left_join(run_metrics, by = "normalized_metric_path")
+  plotted_run_columns <- c(names(metric_display_map), "rejection_rate_on_truth_positive")
+  checks$run_metrics_valid <- assert_true(
+    nrow(accepted_runs) == nrow(manifest) &&
+      all(is.finite(unlist(accepted_runs[plotted_run_columns], use.names = FALSE))) &&
+      all(
+        unlist(accepted_runs[plotted_run_columns], use.names = FALSE) >= 0 &
+          unlist(accepted_runs[plotted_run_columns], use.names = FALSE) <= 1
+      ) &&
+      all(abs(accepted_runs$recall_macro - accepted_runs$balanced_accuracy) < 1e-12) &&
+      all(abs(accepted_runs$recall_weighted - accepted_runs$accuracy) < 1e-12) &&
+      all(
+        is.finite(accepted_runs$n_truth_positive) & accepted_runs$n_truth_positive > 0 &
+          is.finite(accepted_runs$n_pred_zero_on_truth_positive) &
+          accepted_runs$n_pred_zero_on_truth_positive >= 0 &
+          accepted_runs$n_pred_zero_on_truth_positive <= accepted_runs$n_truth_positive
+      ) &&
+      all(
+        abs(
+          accepted_runs$rejection_rate_on_truth_positive -
+            accepted_runs$n_pred_zero_on_truth_positive / accepted_runs$n_truth_positive
+        ) < 1e-15
+      ),
+    "Accepted run metrics are missing, non-finite, out of range, or internally inconsistent"
+  )
+
+  group_columns <- c(
+    "dataset", "dataset_display", "collector_dataset_identity", "dataset_sub_sampling",
+    "model", "model_display", "stratification", "stratification_hash",
+    "stratification_display"
+  )
+  expected_runs <- run_status %>%
+    distinct(
+      collector_dataset_identity,
+      dataset,
+      dataset_sub_sampling,
+      model,
+      stratification,
+      stratification_hash,
+      effective_fold
     ) %>%
+    add_manifest_display_fields()
+  expected_completion <- expected_runs %>%
+    group_by(across(all_of(group_columns))) %>%
+    summarize(expected_effective_case_count = n(), .groups = "drop")
+  observed_completion <- manifest %>%
+    group_by(across(all_of(group_columns))) %>%
+    summarize(completed_case_count = n(), .groups = "drop")
+  completion <- expected_completion %>%
+    left_join(observed_completion, by = group_columns) %>%
+    mutate(
+      completed_case_count = coalesce(completed_case_count, 0L),
+      coverage_fraction = completed_case_count / expected_effective_case_count,
+      coverage_status = ifelse(coverage_fraction == 1, "complete", "incomplete")
+    )
+  aggregate_metrics <- accepted_runs %>%
+    group_by(across(all_of(group_columns))) %>%
     summarize(
-      across(all_of(metric_columns), ~ mean(.x)),
-      aggregate_completed_case_count = n(),
+      across(all_of(names(metric_display_map)), mean),
+      summed_rejected_prediction_events = sum(n_pred_zero_on_truth_positive),
+      summed_truth_positive_events = sum(n_truth_positive),
+      event_weighted_rejection_rate =
+        summed_rejected_prediction_events / summed_truth_positive_events,
       .groups = "drop"
     )
+  figure_base <- completion %>%
+    left_join(aggregate_metrics, by = group_columns)
+  checks$complete_matrix_coverage <- assert_true(
+    sum(figure_base$completed_case_count) == nrow(manifest) &&
+      all(figure_base$completed_case_count == figure_base$expected_effective_case_count) &&
+      all(figure_base$coverage_fraction == 1),
+    "Accepted manifest did not produce complete figure coverage"
+  )
 
-  group_key <- c("collector_dataset_identity", "collector_model", "stratification")
-  checks$coverage_groups_unique <- assert_true(
-    !anyDuplicated(summary[group_key]),
-    "Coverage summary groups are not unique"
+  per_population <- read_tsv_required(
+    paths$per_population,
+    c(
+      "source_path", "run_id", "population_id", "population_name", "population",
+      "f1", "recall", "training_support", "present_in_training", "test_truth_count",
+      "eligible_test_count", "test_support_fraction", "rare_bucket"
+    )
+  ) %>%
+    transmute(
+      collector_source_path = as.character(source_path),
+      normalized_metric_path = normalize_absolute_metric_paths(source_path),
+      run_id = as.character(run_id),
+      population_id = as.character(population_id),
+      population_name = as.character(population_name),
+      population = as.character(population),
+      f1 = as.numeric(f1),
+      recall = as.numeric(recall),
+      training_support = as.numeric(training_support),
+      present_in_training = normalize_logical(present_in_training, "present_in_training"),
+      test_truth_count = as.numeric(test_truth_count),
+      eligible_test_count = as.numeric(eligible_test_count),
+      test_support_fraction = as.numeric(test_support_fraction),
+      rare_bucket = as.character(rare_bucket)
+    )
+  per_population_key <- c("normalized_metric_path", "run_id", "population_id")
+  checks$per_population_matches_manifest <- assert_true(
+    nrow(per_population) > 0 &&
+      all(per_population$run_id == "run0") &&
+      all(complete.cases(per_population[per_population_key])) &&
+      !anyDuplicated(per_population[per_population_key]) &&
+      setequal(unique(per_population$normalized_metric_path), manifest$normalized_metric_path),
+    "Per-population rows do not map uniquely across all accepted manifest records"
   )
-  figure_base <- summary %>%
-    left_join(aggregate_metrics, by = group_key) %>%
-    add_display_fields()
+  checks$per_population_support_valid <- assert_true(
+    all(
+      is.finite(per_population$training_support) & per_population$training_support >= 0 &
+        is.finite(per_population$test_truth_count) & per_population$test_truth_count >= 0 &
+        is.finite(per_population$eligible_test_count) & per_population$eligible_test_count >= 0
+    ) &&
+      all(per_population$present_in_training == (per_population$training_support > 0)),
+    "Per-population support fields are invalid or inconsistent"
+  )
 
-  checks$completed_counts_reconciled <- assert_true(
-    all(
-      ifelse(
-        figure_base$completed_case_count == 0,
-        is.na(figure_base$aggregate_completed_case_count),
-        figure_base$completed_case_count == figure_base$aggregate_completed_case_count
-      )
-    ),
-    "Fold aggregation counts do not match expected coverage"
+  accepted_populations <- manifest %>%
+    select(all_of(group_columns), effective_fold, metric_path, normalized_metric_path) %>%
+    inner_join(per_population, by = "normalized_metric_path")
+  checks$all_per_population_rows_joined <- assert_true(
+    nrow(accepted_populations) == nrow(per_population),
+    "A per-population row was lost while joining accepted manifest records"
   )
-  checks$no_missing_or_rejection_zero_imputation <- assert_true(
-    all(
-      ifelse(
-        figure_base$completed_case_count == 0,
-        is.na(figure_base$f1_macro) & is.na(figure_base$event_weighted_rejection_rate),
-        TRUE
-      )
-    ),
-    "A missing metric or rejection rate was zero-imputed"
+  rare_population <- accepted_populations %>%
+    filter_rare_population() %>%
+    mutate(
+      rare_bucket = factor(rare_bucket, levels = rare_bucket_levels),
+      training_presence = factor(
+        ifelse(present_in_training, "Present in training", "Absent from training"),
+        levels = c("Absent from training", "Present in training")
+      ),
+      population_label = coalesce(population_name, population, population_id)
+    )
+  checks$rare_population_filter_preserves_observations <- assert_true(
+      nrow(rare_population) == nrow(filter_rare_population(per_population)) &&
+      nrow(rare_population) > 0 &&
+      any(rare_population$present_in_training) &&
+      any(!rare_population$present_in_training),
+    paste0(
+      "Rare-population filtering lost observations or did not produce both ",
+      "training-present and training-absent rows"
+    )
   )
-  checks$rejection_rates_recomputed <- assert_true(
+  checks$rare_population_values_valid <- assert_true(
     all(
-      is.na(figure_base$event_weighted_rejection_rate) |
+      !is.na(rare_population$population_label) &
+        nzchar(trimws(rare_population$population_label)) &
+        rare_population$f1 >= 0 & rare_population$f1 <= 1 &
+        rare_population$recall >= 0 & rare_population$recall <= 1 &
+        rare_population$test_support_fraction < 0.05 &
+        ifelse(
+          rare_population$rare_bucket == "<1%",
+          rare_population$test_support_fraction < 0.01,
+          rare_population$test_support_fraction >= 0.01
+        ) &
         abs(
-          figure_base$event_weighted_rejection_rate -
-            figure_base$summed_rejected_prediction_events /
-              figure_base$summed_truth_positive_denominator
-        ) < 1e-15
+          rare_population$test_support_fraction -
+            rare_population$test_truth_count / rare_population$eligible_test_count
+        ) < 1e-12
     ),
-    "Rejection rates do not equal summed events divided by summed denominators"
-  )
-  plotted_columns <- c(metric_columns, "event_weighted_rejection_rate", "coverage_fraction")
-  plotted_values <- unlist(figure_base[plotted_columns], use.names = FALSE)
-  checks$all_plotted_values_in_zero_one <- assert_true(
-    all(plotted_values >= 0 & plotted_values <= 1, na.rm = TRUE),
-    "A plotted value is outside the shared 0-1 scale"
+    "Retained rare-population metrics or support fractions are inconsistent"
   )
 
   list(
     figure_base = figure_base,
+    rare_population = rare_population,
+    manifest_rows = nrow(manifest),
+    per_population_rows = nrow(per_population),
+    dataset_metadata_entries = length(dataset_metadata),
     checks = checks,
-    paths = paths,
     input_hashes = vapply(paths, sha256_file, character(1))
   )
 }
 
 common_source_columns <- c(
-  "dataset", "dataset_display", "collector_dataset_identity", "collector_model",
-  "model_display", "stratification", "stratification_display",
-  "completed_case_count", "expected_effective_case_count", "coverage_fraction",
-  "coverage_status", "missing_source_status_counts"
+  "dataset", "dataset_display", "collector_dataset_identity", "dataset_sub_sampling",
+  "model", "model_display", "stratification", "stratification_hash",
+  "stratification_display", "completed_case_count", "expected_effective_case_count",
+  "coverage_fraction", "coverage_status"
 )
 
 performance_source <- function(base, metrics) {
@@ -365,7 +541,7 @@ performance_source <- function(base, metrics) {
     mutate(
       metric_display = unname(metric_display_map[metric]),
       metric_display = factor(metric_display, levels = unname(metric_display_map[metrics])),
-      aggregation = "arithmetic mean across completed effective folds; no missing-fold imputation"
+      aggregation = "arithmetic mean across accepted effective folds"
     ) %>%
     arrange(metric_display, stratification_display, model_display, dataset_display)
 }
@@ -375,25 +551,25 @@ rejection_source <- function(base) {
     select(
       all_of(common_source_columns),
       summed_rejected_prediction_events,
-      summed_truth_positive_denominator,
+      summed_truth_positive_events,
       value = event_weighted_rejection_rate
     ) %>%
     mutate(
       metric = "model_rejection_event_rate",
       metric_display = "Model-rejection event rate",
-      aggregation = "sum(rejected prediction events) / sum(truth-positive events) across completed effective folds"
+      aggregation = "sum(n_pred_zero_on_truth_positive) / sum(n_truth_positive) across accepted effective folds"
     ) %>%
     arrange(stratification_display, model_display, dataset_display)
 }
 
 coverage_source <- function(base) {
   base %>%
-    select(all_of(common_source_columns), missing_not_run_case_count, missing_configured_case_count) %>%
+    select(all_of(common_source_columns)) %>%
     mutate(
       metric = "completion_coverage",
       metric_display = "Completion coverage",
       value = coverage_fraction,
-      aggregation = "completed effective cases / expected effective cases"
+      aggregation = "accepted effective cases / expected effective cases; PASS requires equality"
     ) %>%
     arrange(stratification_display, model_display, dataset_display)
 }
@@ -436,18 +612,11 @@ make_tile_plot <- function(source, title, subtitle, caption, percent = FALSE) {
         completed_case_count,
         expected_effective_case_count
       ),
-      label_color = ifelse(!is.na(value) & value >= 0.58, "white", "#111111"),
-      partial = coverage_status == "partial"
+      label_color = ifelse(!is.na(value) & value >= 0.58, "white", "#111111")
     )
 
   ggplot(source, aes(x = dataset_display, y = model_display, fill = value)) +
     geom_tile(color = "white", linewidth = 0.25) +
-    geom_tile(
-      data = source %>% filter(partial),
-      fill = NA,
-      color = "#b35c00",
-      linewidth = 0.9
-    ) +
     geom_text(aes(label = cell_label, color = label_color), size = 2.05, lineheight = 0.9) +
     facet_grid(metric_display ~ stratification_display, drop = FALSE) +
     scale_fill_gradientn(
@@ -466,12 +635,145 @@ make_tile_plot <- function(source, title, subtitle, caption, percent = FALSE) {
     reviewer_theme()
 }
 
+prepare_rare_f1_source <- function(data) {
+  group_summary <- data %>%
+    group_by(model_display, rare_bucket, training_presence) %>%
+    summarize(
+      observation_n = n(),
+      median_f1 = median(f1),
+      violin_drawn = observation_n >= minimum_violin_observations,
+      .groups = "drop"
+    )
+
+  data %>%
+    left_join(
+      group_summary,
+      by = c("model_display", "rare_bucket", "training_presence")
+    ) %>%
+    select(
+      dataset,
+      dataset_display,
+      collector_dataset_identity,
+      dataset_sub_sampling,
+      model,
+      model_display,
+      stratification,
+      stratification_hash,
+      stratification_display,
+      effective_fold,
+      metric_path,
+      collector_source_path,
+      run_id,
+      population_id,
+      population_name,
+      population,
+      population_label,
+      f1,
+      recall,
+      training_support,
+      present_in_training,
+      training_presence,
+      test_truth_count,
+      eligible_test_count,
+      test_support_fraction,
+      rare_bucket,
+      observation_n,
+      median_f1,
+      violin_drawn
+    ) %>%
+    arrange(training_presence, rare_bucket, model_display, dataset_display, effective_fold, population_label)
+}
+
+make_rare_f1_plot <- function(source, represented_only = FALSE) {
+  group_summary <- source %>%
+    distinct(
+      model_display,
+      rare_bucket,
+      training_presence,
+      observation_n,
+      median_f1,
+      violin_drawn
+    )
+  title <- if (represented_only) {
+    "Sensitivity: represented rare-population F1"
+  } else {
+    "Rare-population F1 across all accepted observations"
+  }
+  subtitle <- if (represented_only) {
+    "Observation-level sensitivity: only populations represented in that fold's training reference"
+  } else {
+    "Finite outcomes with positive test support; panels separate training representation"
+  }
+  caption <- if (represented_only) {
+    "Only represented population observations are filtered in; complete folds are not filtered out. Points are observations, diamonds are medians, and violins require n >= 3."
+  } else {
+    "Points preserve accepted effective-fold population observations; diamonds are medians. Density violins require n >= 3."
+  }
+
+  plot <- ggplot(source, aes(x = model_display, y = f1)) +
+    geom_violin(
+      data = source %>% filter(violin_drawn),
+      width = 0.82,
+      scale = "width",
+      trim = TRUE,
+      fill = "#d7e3ea",
+      color = "#59717e",
+      linewidth = 0.3
+    ) +
+    geom_point(
+      position = position_jitter(width = 0.14, height = 0, seed = 20260803),
+      shape = 16,
+      size = 0.85,
+      alpha = 0.38,
+      color = "#174a67"
+    ) +
+    geom_point(
+      data = group_summary,
+      aes(x = model_display, y = median_f1),
+      inherit.aes = FALSE,
+      shape = 23,
+      size = 2.2,
+      stroke = 0.3,
+      fill = "#111111",
+      color = "white"
+    ) +
+    geom_text(
+      data = group_summary,
+      aes(x = model_display, y = 0.99, label = paste0("n=", observation_n)),
+      inherit.aes = FALSE,
+      size = 2.35,
+      vjust = 1,
+      color = "#111111"
+    ) +
+    scale_y_continuous(
+      limits = c(0, 1),
+      breaks = seq(0, 1, by = 0.25),
+      expand = expansion(mult = c(0.01, 0.01))
+    ) +
+    scale_x_discrete(drop = FALSE) +
+    labs(title = title, subtitle = subtitle, x = NULL, y = "Per-population F1", caption = caption) +
+    reviewer_theme() +
+    theme(
+      axis.title.y = element_text(size = 8, margin = margin(r = 6)),
+      axis.text.x = element_text(angle = 30, hjust = 1, vjust = 1, size = 7),
+      panel.grid.major.y = element_line(color = "#e7e7e7", linewidth = 0.25),
+      strip.background = element_blank(),
+      strip.text = element_text(face = "bold", size = 8)
+    )
+
+  if (represented_only) {
+    plot + facet_grid(. ~ rare_bucket, drop = FALSE)
+  } else {
+    plot + facet_grid(training_presence ~ rare_bucket, drop = FALSE)
+  }
+}
+
 save_figure <- function(plot, output_dir, stem, width, height) {
   pdf_path <- file.path(output_dir, paste0(stem, ".pdf"))
   svg_path <- file.path(output_dir, paste0(stem, ".svg"))
   png_path <- file.path(output_dir, paste0(stem, ".png"))
   ggsave(pdf_path, plot = plot, width = width, height = height, device = cairo_pdf, bg = "white")
-  ggsave(svg_path, plot = plot, width = width, height = height, device = svglite::svglite, bg = "white")
+  ggsave(svg_path, plot = plot, width = width, height = height, device = grDevices::svg, bg = "white")
   ggsave(
     png_path,
     plot = plot,
@@ -494,39 +796,39 @@ write_source <- function(source, output_dir, stem) {
 
 write_readme <- function(output_dir, counts) {
   lines <- c(
-    "# Reviewer metric figures",
+    "# Final reviewer figures",
     "",
-    "These figures are generated by `collectors/reviewer_figures.R` from the validated revised tables. Each tile is one dataset-parameterization/model/stratification group. Cell text gives the plotted value and `completed/expected` effective-fold count.",
+    "These figures are generated directly from a collector output directory. Collector validation must be `PASS` with 1,386 effective runs, and rows are admitted only when normalized absolute `source_path` exactly matches an accepted manifest `metric_path`.",
     "",
-    "## Figure 1: Macro performance",
+    "## Figures 1 and 2: Macro and support-weighted performance",
     "",
-    "Arithmetic means across completed effective folds for macro precision, macro F1, and macro recall. Under the collector's truth-present-class definition, macro recall equals balanced accuracy exactly. Missing folds are not imputed. Grey `NA` cells are not run; amber outlines are partial.",
-    "",
-    "## Figure 2: Support-weighted performance",
-    "",
-    "Arithmetic means across completed effective folds for support-weighted precision, F1, and recall. Support-weighted recall equals overall accuracy exactly. Missing folds are not imputed. Grey `NA` cells are not run; amber outlines are partial.",
+    "Arithmetic means across accepted effective folds for precision, F1, and recall. Macro recall equals balanced accuracy; support-weighted recall equals overall accuracy.",
     "",
     "## Figure 3: Model-rejection event rate",
     "",
-    "For completed effective folds only, the numerator is the sum of prediction events mapped to the rejection label while truth is a present class; the denominator is the sum of truth-present events. Missing predictions contribute to coverage only and are never entered as zero events or zero denominators.",
+    "The sum of `n_pred_zero_on_truth_positive` divided by the sum of `n_truth_positive` across accepted effective folds, using `run_metrics.tsv` directly.",
     "",
     "## Figure 4: Completion coverage",
     "",
-    "Completed effective cases divided by expected effective cases. This panel must accompany performance summaries so partial GateMeClass results cannot appear equivalent to complete methods. GateMeClass (E) and GateMeClass (V) remain separate throughout.",
+    "Accepted effective cases divided by expected effective cases derived from manifest scalar fields. Collector PASS requires complete coverage, so every cell is 1.",
     "",
-    "## Design and provenance",
+    "## Figure 5: Rare-population F1",
     "",
-    "All performance, rate, and coverage fills use the same literal 0-1 limits. Dataset and model names are direct labels; blue carries magnitude, amber is reserved for partial coverage, and grey `NA` is reserved for not-run groups. The eraser check removed panel grids, decorative borders, and redundant missingness marks; the collision check uses fixed large-format dimensions and two-line cell labels. Corrected spectral rows are retained and obsolete spectral artifacts are excluded by validated provenance.",
+    "Per-population F1 for `<1%` and `1-5%` test-support buckets, split by training representation. Every qualifying accepted observation is retained as a jittered point; diamonds mark medians, labels show `n`, and violins require at least three observations.",
+    "",
+    "## Figure 6: Represented-only sensitivity",
+    "",
+    "Only population observations represented in their fold's training reference are retained. This is an observation-level filter and never removes an entire fold because another population was absent.",
     "",
     sprintf(
-      "Plotted matrix: %d groups, %d dataset parameterizations, %d models, %d stratifications.",
-      counts$groups,
+      "Accepted inputs: %d effective runs, %d dataset parameterizations, %d models, and %d stratifications.",
+      counts$accepted_effective_runs,
       counts$datasets,
       counts$models,
       counts$stratifications
     ),
     "",
-    "PDF and SVG are publication/vector outputs. PNG files are 180 dpi previews. Exact plotted values and denominators are in the four `*-source-data.tsv` files; machine-readable checks and SHA-256 hashes are in `validation-status.json`."
+    "Each figure is saved as PDF, SVG, and 180 dpi PNG. Exact plotted data are in six source TSVs. Local assertions, dimensions, counts, input hashes, and output hashes are recorded in `validation-status.json`."
   )
   writeLines(lines, file.path(output_dir, "README.md"), useBytes = TRUE)
 }
@@ -534,75 +836,110 @@ write_readme <- function(output_dir, counts) {
 main <- function() {
   args <- parse_args(commandArgs(trailingOnly = TRUE))
   if (args$clean && dir.exists(args$output_dir)) {
-    safe_output <- basename(args$output_dir) == "figures" && nchar(args$output_dir) > 10
-    assert_true(safe_output, "Refusing to clean an output directory not named 'figures'")
+    safe_output <- basename(args$output_dir) == "reviewer" &&
+      basename(dirname(args$output_dir)) == "plots" &&
+      nchar(args$output_dir) > 10
+    assert_true(safe_output, "Refusing to clean an output directory not named 'plots/reviewer'")
     unlink(args$output_dir, recursive = TRUE, force = TRUE)
   }
   dir.create(args$output_dir, recursive = TRUE, showWarnings = FALSE)
 
   prepared <- prepare_data(args$input_root)
   base <- prepared$figure_base
+  rare_population <- prepared$rare_population
   macro <- performance_source(base, c("precision_macro", "f1_macro", "recall_macro"))
   weighted <- performance_source(base, c("precision_weighted", "f1_weighted", "recall_weighted"))
   rejection <- rejection_source(base)
   coverage <- coverage_source(base)
+  rare_f1 <- prepare_rare_f1_source(rare_population)
+  represented_rare_f1 <- prepare_rare_f1_source(
+    rare_population %>% filter(present_in_training)
+  )
 
   source_paths <- c(
     macro = write_source(macro, args$output_dir, "figure-1-macro-performance"),
     weighted = write_source(weighted, args$output_dir, "figure-2-support-weighted-performance"),
     rejection = write_source(rejection, args$output_dir, "figure-3-model-rejection-rate"),
-    coverage = write_source(coverage, args$output_dir, "figure-4-completion-coverage")
+    coverage = write_source(coverage, args$output_dir, "figure-4-completion-coverage"),
+    rare_f1 = write_source(rare_f1, args$output_dir, "figure-5-rare-population-f1"),
+    represented_rare_f1 = write_source(
+      represented_rare_f1,
+      args$output_dir,
+      "figure-6-represented-rare-population-f1-sensitivity"
+    )
   )
 
   macro_plot <- make_tile_plot(
     macro,
-    "Macro performance across validated benchmark groups",
-    "Equal fold weight within each cell; all three filtering stratifications remain separate",
-    "* Macro recall equals balanced accuracy over truth-present classes. Cell: mean and completed/expected. Amber border: partial. Grey NA: not run. No zero imputation."
+    "Macro performance across accepted benchmark groups",
+    "Equal effective-fold weight within each cell; stratifications remain separate",
+    "* Macro recall equals balanced accuracy. Cell text: mean and completed/expected effective folds."
   )
   weighted_plot <- make_tile_plot(
     weighted,
-    "Support-weighted performance across validated benchmark groups",
-    "Equal fold weight within each cell; all three filtering stratifications remain separate",
-    "Support-weighted recall equals overall accuracy. Cell: mean and completed/expected. Amber border: partial. Grey NA: not run. No zero imputation."
+    "Support-weighted performance across accepted benchmark groups",
+    "Equal effective-fold weight within each cell; stratifications remain separate",
+    "Support-weighted recall equals overall accuracy. Cell text: mean and completed/expected effective folds."
   )
   rejection_plot <- make_tile_plot(
     rejection,
     "Model-rejection event rate",
-    "Summed rejected prediction events divided by summed truth-present events",
-    "Cell: event-weighted rate and completed/expected. Missing predictions affect coverage only, never numerator or denominator. Amber border: partial. Grey NA: not run.",
+    "Summed rejected truth-positive events divided by summed truth-positive events",
+    "Counts come directly from accepted run_metrics.tsv rows. Cell text: rate and completed/expected effective folds.",
     percent = TRUE
   )
   coverage_plot <- make_tile_plot(
     coverage,
     "Completion coverage",
-    "Completed effective cases divided by expected effective cases",
-    "Coverage is shown separately so partial GateMeClass results cannot resemble complete methods. Amber border: partial. Grey NA: not run.",
+    "Accepted effective cases divided by expected effective cases",
+    "Collector PASS requires the complete canonical matrix; all cells equal 100%.",
     percent = TRUE
+  )
+  rare_f1_plot <- make_rare_f1_plot(rare_f1)
+  represented_rare_f1_plot <- make_rare_f1_plot(
+    represented_rare_f1,
+    represented_only = TRUE
   )
 
   figure_paths <- c(
     save_figure(macro_plot, args$output_dir, "figure-1-macro-performance", 20, 11.5),
     save_figure(weighted_plot, args$output_dir, "figure-2-support-weighted-performance", 20, 11.5),
     save_figure(rejection_plot, args$output_dir, "figure-3-model-rejection-rate", 20, 5.5),
-    save_figure(coverage_plot, args$output_dir, "figure-4-completion-coverage", 20, 5.5)
+    save_figure(coverage_plot, args$output_dir, "figure-4-completion-coverage", 20, 5.5),
+    save_figure(rare_f1_plot, args$output_dir, "figure-5-rare-population-f1", 10, 6.4),
+    save_figure(
+      represented_rare_f1_plot,
+      args$output_dir,
+      "figure-6-represented-rare-population-f1-sensitivity",
+      10,
+      4.3
+    )
   )
 
   counts <- list(
+    accepted_effective_runs = prepared$manifest_rows,
+    per_population_input_rows = prepared$per_population_rows,
+    dataset_metadata_entries = prepared$dataset_metadata_entries,
     groups = nrow(base),
     datasets = n_distinct(base$collector_dataset_identity),
-    models = n_distinct(base$collector_model),
+    models = n_distinct(base$model),
     stratifications = n_distinct(base$stratification),
-    completed_runs = sum(base$completed_case_count),
-    expected_effective_cases = sum(base$expected_effective_case_count),
-    missing_not_run_effective_cases = sum(base$missing_not_run_case_count),
     macro_source_rows = nrow(macro),
     weighted_source_rows = nrow(weighted),
     rejection_source_rows = nrow(rejection),
     coverage_source_rows = nrow(coverage),
-    complete_groups = sum(base$coverage_status == "complete"),
-    partial_groups = sum(base$coverage_status == "partial"),
-    not_run_groups = sum(base$coverage_status == "not_run")
+    rare_population_source_rows = nrow(rare_f1),
+    represented_rare_population_source_rows = nrow(represented_rare_f1),
+    absent_rare_population_observations = sum(!rare_f1$present_in_training),
+    represented_rare_population_observations = sum(rare_f1$present_in_training),
+    rare_population_violin_groups = nrow(
+      distinct(
+        filter(rare_f1, violin_drawn),
+        model_display,
+        rare_bucket,
+        training_presence
+      )
+    )
   )
   write_readme(args$output_dir, counts)
 
@@ -611,55 +948,75 @@ main <- function() {
     all(file.exists(rendered_files)) && all(file.info(rendered_files)$size > 0),
     "One or more rendered outputs are empty"
   )
-  prepared$checks$source_rows_match_full_matrix <- assert_true(
-    nrow(macro) == nrow(base) * 3 &&
-      nrow(weighted) == nrow(base) * 3 &&
-      nrow(rejection) == nrow(base) &&
-      nrow(coverage) == nrow(base),
-    "A source-data table does not contain the full matrix"
-  )
   round_trip_rows <- vapply(
     source_paths,
     function(path) nrow(readr::read_tsv(path, show_col_types = FALSE, progress = FALSE)),
     integer(1)
   )
+  expected_source_rows <- as.integer(
+    c(
+      nrow(macro),
+      nrow(weighted),
+      nrow(rejection),
+      nrow(coverage),
+      nrow(rare_f1),
+      nrow(represented_rare_f1)
+    )
+  )
   prepared$checks$source_tsv_round_trip_rows <- assert_true(
-    identical(
-      unname(round_trip_rows),
-      as.integer(c(nrow(macro), nrow(weighted), nrow(rejection), nrow(coverage)))
-    ),
+    identical(unname(round_trip_rows), expected_source_rows),
     "A source-data TSV does not round-trip to its expected row count"
   )
   prepared$checks$plot_values_match_source_data <- assert_true(
     identical(macro_plot$data$value, macro$value) &&
       identical(weighted_plot$data$value, weighted$value) &&
       identical(rejection_plot$data$value, rejection$value) &&
-      identical(coverage_plot$data$value, coverage$value),
+      identical(coverage_plot$data$value, coverage$value) &&
+      identical(rare_f1_plot$data$f1, rare_f1$f1) &&
+      identical(represented_rare_f1_plot$data$f1, represented_rare_f1$f1),
     "A plotted value differs from its source-data object"
   )
-  prepared$checks$eraser_check <- TRUE
-  prepared$checks$collision_check <- TRUE
+  prepared$checks$represented_sensitivity_is_observation_filter <- assert_true(
+    all(represented_rare_f1$present_in_training) &&
+      nrow(represented_rare_f1) == sum(rare_f1$present_in_training),
+    "Represented-only sensitivity data do not exactly match represented observations"
+  )
+  prepared$checks$violins_require_minimum_observations <- assert_true(
+    all(rare_f1$violin_drawn == (rare_f1$observation_n >= minimum_violin_observations)) &&
+      all(
+        represented_rare_f1$violin_drawn ==
+          (represented_rare_f1$observation_n >= minimum_violin_observations)
+      ),
+    "A rare-population violin violates the minimum observation threshold"
+  )
   prepared$checks$fixed_render_dimensions_inches <- TRUE
 
   validation <- list(
     status = "PASS",
-    collector_commit = published_collector_commit,
     inputs = as.list(prepared$input_hashes),
     counts = counts,
     assertions = prepared$checks,
+    source_data_files = basename(source_paths),
     source_data_sha256 = as.list(vapply(source_paths, sha256_file, character(1))),
     figure_files = basename(figure_paths),
+    output_files = basename(rendered_files),
+    output_sha256 = as.list(
+      setNames(vapply(rendered_files, sha256_file, character(1)), basename(rendered_files))
+    ),
     render_dimensions_inches = list(
       figure_1 = c(width = 20, height = 11.5),
       figure_2 = c(width = 20, height = 11.5),
       figure_3 = c(width = 20, height = 5.5),
-      figure_4 = c(width = 20, height = 5.5)
+      figure_4 = c(width = 20, height = 5.5),
+      figure_5 = c(width = 10, height = 6.4),
+      figure_6 = c(width = 10, height = 4.3)
     ),
     notes = c(
-      "Performance cells are arithmetic means over completed effective folds.",
-      "Rejection cells are event-weighted ratios of summed counts.",
-      "Missing and rejected predictions are never zero-imputed.",
-      "PDF/SVG hashes are not asserted because device metadata can vary; source-data hashes are deterministic."
+      "Collector validation PASS with exactly 1386 effective runs is required.",
+      "Run and population rows join accepted records by normalized source_path and metric_path.",
+      "Manifest scalar fields define dataset, model, stratification, effective fold, and coverage.",
+      "Rare-population plots retain qualifying accepted effective-fold observations.",
+      "The represented-only sensitivity analysis filters observations, not complete folds."
     )
   )
   jsonlite::write_json(
@@ -669,7 +1026,7 @@ main <- function() {
     auto_unbox = TRUE,
     digits = NA
   )
-  message(sprintf("PASS: wrote reviewer figures to %s", args$output_dir))
+  message(sprintf("PASS: wrote final reviewer figures to %s", args$output_dir))
 }
 
 main()
