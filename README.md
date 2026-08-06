@@ -66,6 +66,6 @@ just benchmark
 
 - `Rscript` available in `PATH`
 - R dependencies used by `metric_collector.R` (for example `argparse`,
-  `jsonlite`, `dplyr`, `tidyr`, `ggplot2`, `readr`, `rmarkdown`)
+  `jsonlite`, `dplyr`, `tidyr`, `ggplot2`, `readr`)
 - Metrics JSON outputs and corresponding `data.metadata` files
 - Writable output directory

@@ -7,8 +7,6 @@ required_packages <- c(
   "readr",
   "ggplot2",
   "stringr",
-  "rmarkdown",
-  "knitr",
   "scales",
   "patchwork",
   "cowplot",
@@ -38,8 +36,6 @@ suppressPackageStartupMessages({
   library(readr)
   library(ggplot2)
   library(stringr)
-  library(rmarkdown)
-  library(knitr)
   library(scales)
   library(patchwork)
   library(cowplot)
@@ -2196,300 +2192,67 @@ render_report <- function(
   performance_note = NULL,
   artifact_paths = character()
 ) {
-  report_path <- file.path(output_dir, "metrics_report.Rmd")
   output_html <- file.path(output_dir, "metrics_report.html")
   plot_files <- unique(unlist(plot_paths, use.names = FALSE))
   plot_files <- plot_files[!is.na(plot_files) & plot_files != ""]
   report_files <- unique(c(unlist(tables, use.names = FALSE), artifact_paths))
-  if (!rmarkdown::pandoc_available()) {
-    macro_table <- readr::read_tsv(
-      file.path(output_dir, tables$macro_by_cv),
-      show_col_types = FALSE
-    )
-    population_table <- readr::read_tsv(
-      file.path(output_dir, tables$per_population_by_cv),
-      show_col_types = FALSE
-    )
-    population_availability_table <- readr::read_tsv(
-      file.path(output_dir, tables$population_availability),
-      show_col_types = FALSE
-    )
-    run_metrics_table <- readr::read_tsv(
-      file.path(output_dir, tables$run_metrics),
-      show_col_types = FALSE
-    )
-    per_population_summary_table <- readr::read_tsv(
-      file.path(output_dir, tables$per_population_summary),
-      show_col_types = FALSE
-    )
-    per_population_stability_table <- readr::read_tsv(
-      file.path(output_dir, tables$per_population_stability),
-      show_col_types = FALSE
-    )
-    per_population_confusion_table <- readr::read_tsv(
-      file.path(output_dir, tables$per_population_confusion),
-      show_col_types = FALSE
-    )
-    rare_population_table <- readr::read_tsv(
-      file.path(output_dir, tables$rare_population),
-      show_col_types = FALSE
-    )
-    dataset_context_table <- readr::read_tsv(
-      file.path(output_dir, tables$dataset_context),
-      show_col_types = FALSE
-    )
-    dominant_fnr_table <- readr::read_tsv(
-      file.path(output_dir, tables$dominant_fnr),
-      show_col_types = FALSE
-    )
-    dominant_fpr_table <- readr::read_tsv(
-      file.path(output_dir, tables$dominant_fpr),
-      show_col_types = FALSE
-    )
-    summary_counts <- macro_table %>% summarize(
-      datasets = n_distinct(dataset),
-      models = n_distinct(model),
-      crossvalidations = n_distinct(crossvalidation)
-    )
-    outputs <- data.frame(file = report_files)
-    plot_html <- c()
-    for (plot_file in plot_files) {
-      if (file.exists(file.path(output_dir, plot_file))) {
-        plot_html <- c(
-          plot_html,
-          sprintf("<h3>%s</h3>", basename(plot_file)),
-          sprintf("<img src=\"%s\" />", plot_file)
-        )
-      }
+  escape_html <- function(values) {
+    values <- gsub("&", "&amp;", as.character(values), fixed = TRUE)
+    values <- gsub("<", "&lt;", values, fixed = TRUE)
+    values <- gsub(">", "&gt;", values, fixed = TRUE)
+    values <- gsub("\"", "&quot;", values, fixed = TRUE)
+    values
+  }
+  file_links <- sprintf(
+    "<li><a href=\"%s\">%s</a></li>",
+    escape_html(report_files),
+    escape_html(report_files)
+  )
+  plot_links <- vapply(plot_files, function(plot_file) {
+    if (!file.exists(file.path(output_dir, plot_file))) {
+      return("")
     }
-
-    html_lines <- c(
-      "<html>",
-      "<head><meta charset=\"utf-8\"></head>",
-      "<body>",
-      sprintf("<h1>Metrics Report - %s</h1>", name),
-      "<h2>Overview</h2>",
-      knitr::kable(summary_counts, format = "html"),
-      "<h2>Macro F1 By Crossvalidation</h2>",
-      knitr::kable(macro_table, format = "html"),
-      "<h2>Per-population Metrics By Crossvalidation</h2>",
-      knitr::kable(population_table, format = "html"),
-      "<h2>Population Availability By Crossvalidation</h2>",
-      knitr::kable(population_availability_table, format = "html"),
-      "<h2>Run-level Metrics</h2>",
-      knitr::kable(run_metrics_table, format = "html"),
-      "<h2>Per-population Summary</h2>",
-      knitr::kable(per_population_summary_table, format = "html"),
-      "<h2>Per-population Stability</h2>",
-      knitr::kable(per_population_stability_table, format = "html"),
-      "<h2>Per-population Confusion Stats</h2>",
-      knitr::kable(per_population_confusion_table, format = "html"),
-      "<h2>Rare Population Buckets</h2>",
-      knitr::kable(rare_population_table, format = "html"),
-      "<h2>Dataset Context</h2>",
-      knitr::kable(dataset_context_table, format = "html"),
-      "<h2>Dominant Errors (FNR)</h2>",
-      knitr::kable(dominant_fnr_table, format = "html"),
-      "<h2>Dominant Errors (FPR)</h2>",
-      knitr::kable(dominant_fpr_table, format = "html"),
-      "<h2>Plots</h2>",
-      if (!is.null(performance_note) && performance_note != "") {
-        sprintf("<p><em>Note: %s</em></p>", performance_note)
-      } else {
-        ""
-      },
-      plot_html,
-      "<h2>Outputs</h2>",
-      knitr::kable(outputs, format = "html"),
-      "</body>",
-      "</html>"
+    escaped_path <- escape_html(plot_file)
+    sprintf(
+      paste0(
+        "<figure><a href=\"%s\"><img src=\"%s\" loading=\"lazy\" ",
+        "alt=\"%s\"></a><figcaption>%s</figcaption></figure>"
+      ),
+      escaped_path,
+      escaped_path,
+      escape_html(basename(plot_file)),
+      escape_html(basename(plot_file))
     )
-    writeLines(html_lines, output_html)
-    return(invisible())
-  }
-  note_lines <- if (!is.null(performance_note) && performance_note != "") {
-    c(sprintf("Note: %s", performance_note), "")
+  }, character(1))
+  note_html <- if (!is.null(performance_note) && performance_note != "") {
+    sprintf("<p><em>%s</em></p>", escape_html(performance_note))
   } else {
-    character(0)
-  }
-
-  plot_chunk_lines <- if (length(plot_files) == 0) {
-    c(
-      "```{r}",
-      "plot_files <- character()",
-      "```"
-    )
-  } else {
-    plot_file_lines <- sprintf(
-      "  '%s'%s",
-      plot_files,
-      ifelse(seq_along(plot_files) < length(plot_files), ",", "")
-    )
-    c(
-      "```{r}",
-      "plot_files <- c(",
-      plot_file_lines,
-      ")",
-      "for (plot_file in plot_files) {",
-      "  if (file.exists(plot_file)) {",
-      "    knitr::include_graphics(plot_file)",
-      "  }",
-      "}",
-      "```"
-    )
-  }
-
-  output_file_lines <- sprintf(
-    "    '%s'%s",
-    report_files,
-    ifelse(seq_along(report_files) < length(report_files), ",", "")
-  )
-
-  report_content <- c(
-    "---",
-    sprintf("title: \"Metrics Report - %s\"", name),
-    "output:",
-    "  html_document:",
-    "    toc: true",
-    "    toc_depth: 2",
-    "---",
-    "",
-    "```{r setup, include=FALSE}",
-    "knitr::opts_chunk$set(echo = FALSE)",
-    "library(readr)",
-    "library(dplyr)",
-    "library(knitr)",
-    "```",
-    "",
-    "## Overview",
-    "",
-    "```{r}",
-    sprintf("macro_table <- read_tsv('%s')", tables$macro_by_cv),
-    sprintf("population_table <- read_tsv('%s')", tables$per_population_by_cv),
-    sprintf(
-      "population_availability_table <- read_tsv('%s')",
-      tables$population_availability
-    ),
-    sprintf("run_metrics_table <- read_tsv('%s')", tables$run_metrics),
-    sprintf(
-      "per_population_summary_table <- read_tsv('%s')",
-      tables$per_population_summary
-    ),
-    sprintf(
-      "per_population_stability_table <- read_tsv('%s')",
-      tables$per_population_stability
-    ),
-    sprintf(
-      "per_population_confusion_table <- read_tsv('%s')",
-      tables$per_population_confusion
-    ),
-    sprintf(
-      "rare_population_table <- read_tsv('%s')",
-      tables$rare_population
-    ),
-    sprintf(
-      "dataset_context_table <- read_tsv('%s')",
-      tables$dataset_context
-    ),
-    sprintf("dominant_fnr_table <- read_tsv('%s')", tables$dominant_fnr),
-    sprintf("dominant_fpr_table <- read_tsv('%s')", tables$dominant_fpr),
-    "summary_counts <- macro_table %>% summarize(",
-    "  datasets = n_distinct(dataset),",
-    "  models = n_distinct(model),",
-    "  crossvalidations = n_distinct(crossvalidation)",
-    ")",
-    "kable(summary_counts)",
-    "```",
-    "",
-    "## Macro F1 By Crossvalidation",
-    "",
-    "```{r}",
-    "kable(macro_table)",
-    "```",
-    "",
-    "## Per-population Metrics By Crossvalidation",
-    "",
-    "```{r}",
-    "kable(population_table)",
-    "```",
-    "",
-    "## Population Availability By Crossvalidation",
-    "",
-    "```{r}",
-    "kable(population_availability_table)",
-    "```",
-    "",
-    "## Run-level Metrics",
-    "",
-    "```{r}",
-    "kable(run_metrics_table)",
-    "```",
-    "",
-    "## Per-population Summary",
-    "",
-    "```{r}",
-    "kable(per_population_summary_table)",
-    "```",
-    "",
-    "## Per-population Stability",
-    "",
-    "```{r}",
-    "kable(per_population_stability_table)",
-    "```",
-    "",
-    "## Per-population Confusion Stats",
-    "",
-    "```{r}",
-    "kable(per_population_confusion_table)",
-    "```",
-    "",
-    "## Rare Population Buckets",
-    "",
-    "```{r}",
-    "kable(rare_population_table)",
-    "```",
-    "",
-    "## Dataset Context",
-    "",
-    "```{r}",
-    "kable(dataset_context_table)",
-    "```",
-    "",
-    "## Dominant Errors (FNR)",
-    "",
-    "```{r}",
-    "kable(dominant_fnr_table)",
-    "```",
-    "",
-    "## Dominant Errors (FPR)",
-    "",
-    "```{r}",
-    "kable(dominant_fpr_table)",
-    "```",
-    "",
-    "## Plots",
-    "",
-    note_lines,
-    plot_chunk_lines,
-    "",
-    "## Outputs",
-    "",
-    "```{r}",
-    "outputs <- data.frame(",
-    "  file = c(",
-    output_file_lines,
-    "  )",
-    ")",
-    "kable(outputs)",
-    "```",
     ""
+  }
+  html_lines <- c(
+    "<!doctype html>",
+    "<html lang=\"en\"><head><meta charset=\"utf-8\">",
+    sprintf("<title>Metrics Report - %s</title>", escape_html(name)),
+    paste0(
+      "<style>body{font:16px/1.5 sans-serif;max-width:1100px;margin:2rem auto;",
+      "padding:0 1rem;color:#222}img{max-width:100%;height:auto}li{margin:.25rem 0}",
+      "figure{margin:2rem 0}code{background:#f2f2f2;padding:.1rem .3rem}</style>"
+    ),
+    "</head><body>",
+    sprintf("<h1>Metrics Report - %s</h1>", escape_html(name)),
+    paste0(
+      "<p>The complete aggregated data are provided as TSV and JSON artifacts. ",
+      "Large tables are intentionally not embedded in this HTML index.</p>"
+    ),
+    note_html,
+    "<h2>Outputs</h2><ul>",
+    file_links,
+    "</ul><h2>Plots</h2>",
+    plot_links,
+    "</body></html>"
   )
-  writeLines(report_content, report_path)
-  rmarkdown::render(
-    input = report_path,
-    output_file = output_html,
-    quiet = TRUE
-  )
+  writeLines(html_lines, output_html, useBytes = TRUE)
+  unlink(file.path(output_dir, c("metrics_report.Rmd", "metrics_report.knit.md")))
 }
 
 args <- parse_cli_args()
