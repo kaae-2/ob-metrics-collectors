@@ -249,8 +249,6 @@ filter_rare_population <- function(data) {
   data %>%
     filter(
       rare_bucket %in% rare_bucket_levels,
-      is.finite(f1),
-      is.finite(recall),
       test_truth_count > 0,
       eligible_test_count > 0,
       is.finite(test_support_fraction),
@@ -447,7 +445,6 @@ prepare_data <- function(input_root) {
     "stratification_display"
   )
   expected_runs <- run_status %>%
-    filter(status == "completed") %>%
     distinct(
       collector_dataset_identity,
       dataset,
@@ -483,11 +480,13 @@ prepare_data <- function(input_root) {
     )
   figure_base <- completion %>%
     left_join(aggregate_metrics, by = group_columns)
-  checks$complete_matrix_coverage <- assert_true(
+  checks$requested_matrix_coverage_reconciled <- assert_true(
     sum(figure_base$completed_case_count) == nrow(manifest) &&
-      all(figure_base$completed_case_count == figure_base$expected_effective_case_count) &&
-      all(figure_base$coverage_fraction == 1),
-    "Accepted manifest did not produce complete figure coverage"
+      sum(figure_base$expected_effective_case_count) ==
+        nrow(distinct(run_status, across(all_of(effective_key)))) &&
+      all(figure_base$completed_case_count <= figure_base$expected_effective_case_count) &&
+      all(figure_base$coverage_fraction >= 0 & figure_base$coverage_fraction <= 1),
+    "Requested and accepted effective-run coverage did not reconcile"
   )
 
   per_population <- read_tsv_required(
@@ -559,6 +558,8 @@ prepare_data <- function(input_root) {
     all(
       !is.na(rare_population$population_label) &
         nzchar(trimws(rare_population$population_label)) &
+        is.finite(rare_population$f1) &
+        is.finite(rare_population$recall) &
         rare_population$f1 >= 0 & rare_population$f1 <= 1 &
         rare_population$recall >= 0 & rare_population$recall <= 1 &
         rare_population$test_support_fraction < 0.05 &
@@ -628,7 +629,7 @@ coverage_source <- function(base) {
       metric = "completion_coverage",
       metric_display = "Completion coverage",
       value = coverage_fraction,
-      aggregation = "accepted effective cases / expected effective cases; PASS requires equality"
+      aggregation = "accepted effective cases / requested effective cases, including not_run"
     ) %>%
     arrange(stratification_display, model_display, dataset_display)
 }
@@ -869,7 +870,7 @@ write_readme <- function(output_dir, counts) {
     "",
     "## Figure 4: Completion coverage",
     "",
-    "Accepted effective cases divided by expected runnable cases derived from run status. Collector PASS requires complete coverage, so every cell is 1.",
+    "Accepted effective cases divided by all requested effective cases derived from run status, including explicit `not_run` cases.",
     "",
     "## Figure 5: Rare-population F1",
     "",
@@ -951,7 +952,7 @@ main <- function() {
     coverage,
     "Completion coverage",
     "Accepted effective cases divided by expected effective cases",
-    "Collector PASS requires the complete supplied matrix; all cells equal 100%.",
+    "The denominator includes explicit not_run cases from the requested benchmark matrix.",
     percent = TRUE
   )
   rare_f1_plot <- make_rare_f1_plot(rare_f1)

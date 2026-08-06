@@ -21,7 +21,10 @@ The extended plot suite is generated from collector outputs only
 `run_metrics.tsv`, `dataset_metadata.json`). The macro and run-level TSVs report
 precision and recall alongside F1 (`precision_macro`, `recall_macro`,
 `precision_weighted`, `recall_weighted`) while preserving the historical F1 file
-names for compatibility. Dataset display names default to the metadata
+names for compatibility. Run-level timing uses measured model wall time and
+reports eligible training cells, eligible test cells, total processed cells, and
+derived cell throughput; unsupported empty runtime and correlation fields are
+not emitted. Dataset display names default to the metadata
 abbreviation (`expected_abbreviation`) when available.
 
 Generated plot files now use `fig*` prefixes and include only the rewritten

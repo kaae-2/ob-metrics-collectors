@@ -1201,7 +1201,11 @@ build_finalization_outputs <- function(requested_metrics, effective_metrics, out
       stratification,
       stratification_hash,
       effective_fold,
+      n_training_cells_eligible,
+      n_test_cells_eligible,
+      n_cells_processed,
       model_wall_seconds,
+      throughput_cells_per_second,
       performance_path,
       metric_path = source_path
     )
@@ -2704,6 +2708,49 @@ population_availability_df <- population_availability_df %>%
   ) %>%
   ungroup()
 
+processing_key <- c(
+  "dataset",
+  "model",
+  "stratification",
+  "stratification_hash",
+  "crossvalidation",
+  "run_id"
+)
+run_processing_context <- population_availability_df %>%
+  group_by(across(all_of(processing_key))) %>%
+  summarize(
+    n_training_cells_eligible = sum(training_support),
+    n_test_cells_eligible = sum(test_truth_count),
+    .groups = "drop"
+  ) %>%
+  mutate(n_cells_processed = n_training_cells_eligible + n_test_cells_eligible)
+metrics_df <- metrics_df %>%
+  left_join(run_processing_context, by = processing_key) %>%
+  mutate(
+    throughput_cells_per_second = ifelse(
+      model_wall_seconds > 0,
+      n_cells_processed / model_wall_seconds,
+      NA_real_
+    )
+  )
+if (
+  any(
+    !is.finite(metrics_df$n_training_cells_eligible) |
+      metrics_df$n_training_cells_eligible < 0 |
+      !is.finite(metrics_df$n_test_cells_eligible) |
+      metrics_df$n_test_cells_eligible <= 0 |
+      metrics_df$n_test_cells_eligible != metrics_df$n_cells |
+      !is.finite(metrics_df$n_cells_processed) |
+      metrics_df$n_cells_processed <= 0 |
+      !is.finite(metrics_df$model_wall_seconds) |
+      metrics_df$model_wall_seconds <= 0 |
+      !is.finite(metrics_df$throughput_cells_per_second) |
+      metrics_df$throughput_cells_per_second <= 0
+  )
+) {
+  stop("Model wall-time or processed-cell context is missing or inconsistent.")
+}
+
 per_population_df <- per_population_df %>%
   left_join(
     population_availability_df %>%
@@ -2752,12 +2799,7 @@ per_population_df <- per_population_df %>%
         precision_macro,
         recall_macro,
         balanced_accuracy,
-        overall_accuracy = accuracy,
-        mcc,
-        pop_freq_corr,
-        overlap,
-        runtime_seconds,
-        scalability_seconds_per_item
+        overall_accuracy = accuracy
       ),
     by = c(
       "dataset",
@@ -2771,6 +2813,82 @@ per_population_df <- per_population_df %>%
       "run_id"
     )
   )
+
+truth_present_population <- per_population_df %>%
+  filter(!is.na(test_truth_count), test_truth_count > 0)
+invalid_truth_present_population <- truth_present_population %>%
+  filter(
+    !is.finite(f1) |
+      !is.finite(precision) |
+      !is.finite(recall) |
+      !is.finite(accuracy) |
+      !is.finite(scaling_rate)
+  )
+if (nrow(invalid_truth_present_population) > 0) {
+  example <- invalid_truth_present_population[1, ]
+  stop(
+    sprintf(
+      paste0(
+        "Truth-present population has a non-finite metric: ",
+        "dataset=%s model=%s stratification=%s crossvalidation=%s population=%s"
+      ),
+      example$dataset,
+      example$model,
+      example$stratification,
+      example$crossvalidation,
+      example$population_id
+    )
+  )
+}
+
+macro_key <- c(
+  "dataset",
+  "model",
+  "stratification",
+  "stratification_hash",
+  "crossvalidation",
+  "run_id"
+)
+recomputed_macros <- truth_present_population %>%
+  group_by(across(all_of(macro_key))) %>%
+  summarize(
+    recomputed_f1_macro = mean(f1),
+    recomputed_precision_macro = mean(precision),
+    recomputed_recall_macro = mean(recall),
+    .groups = "drop"
+  )
+macro_reconciliation <- metrics_df %>%
+  select(
+    all_of(macro_key),
+    f1_macro,
+    precision_macro,
+    recall_macro,
+    balanced_accuracy
+  ) %>%
+  left_join(recomputed_macros, by = macro_key)
+macro_tolerance <- 1e-12
+invalid_macro_rows <- macro_reconciliation %>%
+  filter(
+    !is.finite(f1_macro) |
+      !is.finite(precision_macro) |
+      !is.finite(recall_macro) |
+      !is.finite(balanced_accuracy) |
+      !is.finite(recomputed_f1_macro) |
+      !is.finite(recomputed_precision_macro) |
+      !is.finite(recomputed_recall_macro) |
+      abs(f1_macro - recomputed_f1_macro) > macro_tolerance |
+      abs(precision_macro - recomputed_precision_macro) > macro_tolerance |
+      abs(recall_macro - recomputed_recall_macro) > macro_tolerance |
+      abs(balanced_accuracy - recomputed_recall_macro) > macro_tolerance
+  )
+if (nrow(macro_reconciliation) != nrow(metrics_df) || nrow(invalid_macro_rows) > 0) {
+  stop(
+    paste0(
+      "Reported macro metrics do not reconcile with finite truth-present ",
+      "per-population metrics."
+    )
+  )
+}
 
 macro_table <- metrics_df %>%
   select(
@@ -2844,13 +2962,6 @@ population_availability_table <- population_availability_df %>%
   arrange(dataset, model, crossvalidation, run_id, population_id)
 
 run_metrics_table <- metrics_df %>%
-  mutate(
-    throughput_events_per_sec = ifelse(
-      runtime_seconds > 0,
-      n_cells / runtime_seconds,
-      NA_real_
-    )
-  ) %>%
   select(
     dataset,
     model,
@@ -2858,6 +2969,9 @@ run_metrics_table <- metrics_df %>%
     stratification_hash,
     crossvalidation,
     run_id,
+    n_training_cells_eligible,
+    n_test_cells_eligible,
+    n_cells_processed,
     n_cells,
     n_cells_total,
     n_truth_positive,
@@ -2874,12 +2988,8 @@ run_metrics_table <- metrics_df %>%
     precision_weighted,
     recall_weighted,
     accuracy,
-    mcc,
-    pop_freq_corr,
-    overlap,
-    runtime_seconds,
-    scalability_seconds_per_item,
-    throughput_events_per_sec,
+    model_wall_seconds,
+    throughput_cells_per_second,
     source_path
   ) %>%
   arrange(dataset, model, crossvalidation, run_id)
