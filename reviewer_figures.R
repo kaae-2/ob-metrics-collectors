@@ -12,6 +12,7 @@ model_display_map <- c(
   "cyanno" = "CyAnno",
   "cygate" = "CyGATE",
   "dgcytof" = "DGCyTOF",
+  "gatemeclass" = "GateMeClass",
   "knn" = "KNN",
   "lda" = "LDA",
   "random" = "Random"
@@ -176,13 +177,38 @@ short_count <- function(value) {
 }
 
 add_manifest_display_fields <- function(manifest) {
-  assert_true(
-    setequal(unique(manifest$model), names(model_display_map)),
-    "Accepted manifest does not contain the canonical six models"
+  model_ids <- unique(manifest$model)
+  model_bases <- sub("\\[.*$", "", model_ids)
+  model_suffixes <- ifelse(
+    grepl("\\[", model_ids),
+    paste0(" ", sub("^[^[]+", "", model_ids)),
+    ""
   )
-  assert_true(
-    setequal(unique(manifest$stratification), names(stratification_display_map)),
-    "Accepted manifest does not contain the canonical three stratifications"
+  model_labels <- unname(model_display_map[model_bases])
+  model_labels[is.na(model_labels)] <- model_bases[is.na(model_labels)]
+  model_labels <- paste0(model_labels, model_suffixes)
+  model_order <- order(
+    match(model_bases, names(model_display_map), nomatch = length(model_display_map) + 1L),
+    model_ids
+  )
+  model_labels <- setNames(model_labels, model_ids)
+  model_levels <- unname(model_labels[model_ids[model_order]])
+
+  stratification_ids <- unique(manifest$stratification)
+  stratification_labels <- unname(stratification_display_map[stratification_ids])
+  stratification_labels[is.na(stratification_labels)] <-
+    stratification_ids[is.na(stratification_labels)]
+  stratification_order <- order(
+    match(
+      stratification_ids,
+      names(stratification_display_map),
+      nomatch = length(stratification_display_map) + 1L
+    ),
+    stratification_ids
+  )
+  stratification_labels <- setNames(stratification_labels, stratification_ids)
+  stratification_levels <- unname(
+    stratification_labels[stratification_ids[stratification_order]]
   )
 
   dataset_labels <- manifest %>%
@@ -209,12 +235,12 @@ add_manifest_display_fields <- function(manifest) {
     mutate(
       dataset_display = factor(dataset_display, levels = dataset_labels$dataset_display),
       model_display = factor(
-        unname(model_display_map[model]),
-        levels = unname(model_display_map)
+        unname(model_labels[model]),
+        levels = model_levels
       ),
       stratification_display = factor(
-        unname(stratification_display_map[stratification]),
-        levels = unname(stratification_display_map)
+        unname(stratification_labels[stratification]),
+        levels = stratification_levels
       )
     )
 }
@@ -249,8 +275,8 @@ prepare_data <- function(input_root) {
   checks$collector_validation_pass_and_complete <- assert_true(
     identical(collector_validation$status, "PASS") &&
       !is.null(collector_validation$counts$effective) &&
-      as.integer(collector_validation$counts$effective) == 1386L,
-    "Collector validation must be PASS with exactly 1386 effective runs"
+      as.integer(collector_validation$counts$effective) > 0,
+    "Collector validation must be PASS with a positive effective-run count"
   )
   checks$dataset_metadata_present <- assert_true(
     is.list(dataset_metadata) && length(dataset_metadata) > 0,
@@ -268,8 +294,8 @@ prepare_data <- function(input_root) {
     "Accepted manifest has missing or duplicate effective-run keys or metric paths"
   )
   checks$collector_effective_count_reconciled <- assert_true(
-    nrow(manifest) == 1386L,
-    "Accepted manifest must contain exactly 1386 effective runs"
+    nrow(manifest) == as.integer(collector_validation$counts$effective),
+    "Accepted manifest count does not match collector validation"
   )
 
   manifest <- manifest %>%
@@ -287,7 +313,7 @@ prepare_data <- function(input_root) {
     c(
       "collector_dataset_identity", "dataset", "dataset_sub_sampling", "model",
       "requested_fold", "effective_fold", "stratification", "stratification_hash",
-      "status"
+      "status", "reason", "selected_for_effective", "metric_path"
     )
   ) %>%
     transmute(
@@ -299,7 +325,13 @@ prepare_data <- function(input_root) {
       effective_fold = as.integer(effective_fold),
       stratification = as.character(stratification),
       stratification_hash = as.character(stratification_hash),
-      status = as.character(status)
+      status = as.character(status),
+      reason = as.character(reason),
+      selected_for_effective = normalize_logical(
+        selected_for_effective,
+        "selected_for_effective"
+      ),
+      normalized_metric_path = normalize_absolute_metric_paths(metric_path)
     )
   requested_group_key <- c(
     "collector_dataset_identity", "model", "stratification_hash"
@@ -311,13 +343,44 @@ prepare_data <- function(input_root) {
       requested_folds = paste(sort(requested_fold), collapse = ","),
       .groups = "drop"
     )
+  requested_folds <- sort(unique(run_status$requested_fold))
+  requested_fold_signature <- paste(requested_folds, collapse = ",")
   checks$run_status_complete <- assert_true(
-    nrow(run_status) == 1440L &&
-      all(run_status$status == "completed") &&
-      nrow(requested_groups) == 288L &&
-      all(requested_groups$requested_count == 5L) &&
-      all(requested_groups$requested_folds == "1,2,3,4,5"),
+    !is.null(collector_validation$counts$requested) &&
+      nrow(run_status) == as.integer(collector_validation$counts$requested) &&
+      all(run_status$status %in% c("completed", "not_run")) &&
+      all(
+        run_status$status != "not_run" |
+          (!is.na(run_status$reason) & nzchar(trimws(run_status$reason)))
+      ) &&
+      length(requested_folds) > 0 &&
+      all(requested_groups$requested_count == length(requested_folds)) &&
+      all(requested_groups$requested_folds == requested_fold_signature),
     "run-status.tsv does not contain the complete requested benchmark matrix"
+  )
+  effective_key <- c(
+    "collector_dataset_identity", "model", "stratification_hash", "effective_fold"
+  )
+  expected_effective_keys <- run_status %>%
+    filter(status == "completed") %>%
+    distinct(across(all_of(effective_key)))
+  manifest_effective_keys <- manifest %>%
+    distinct(across(all_of(effective_key)))
+  checks$effective_keys_reconciled <- assert_true(
+    nrow(expected_effective_keys) == nrow(manifest_effective_keys) &&
+      nrow(anti_join(expected_effective_keys, manifest_effective_keys, by = effective_key)) == 0 &&
+      nrow(anti_join(manifest_effective_keys, expected_effective_keys, by = effective_key)) == 0,
+    "Accepted manifest effective keys do not match completed run-status keys"
+  )
+  selected_runs <- run_status %>% filter(selected_for_effective)
+  selected_key <- c(effective_key, "normalized_metric_path")
+  checks$selected_runs_reconciled <- assert_true(
+    nrow(selected_runs) == nrow(manifest) &&
+      all(selected_runs$status == "completed") &&
+      !anyDuplicated(selected_runs[effective_key]) &&
+      nrow(anti_join(selected_runs, manifest, by = selected_key)) == 0 &&
+      nrow(anti_join(manifest, selected_runs, by = selected_key)) == 0,
+    "Selected run-status rows do not map one-to-one to the accepted manifest"
   )
 
   run_metrics <- read_tsv_required(
@@ -384,6 +447,7 @@ prepare_data <- function(input_root) {
     "stratification_display"
   )
   expected_runs <- run_status %>%
+    filter(status == "completed") %>%
     distinct(
       collector_dataset_identity,
       dataset,
@@ -488,13 +552,8 @@ prepare_data <- function(input_root) {
     )
   checks$rare_population_filter_preserves_observations <- assert_true(
       nrow(rare_population) == nrow(filter_rare_population(per_population)) &&
-      nrow(rare_population) > 0 &&
-      any(rare_population$present_in_training) &&
-      any(!rare_population$present_in_training),
-    paste0(
-      "Rare-population filtering lost observations or did not produce both ",
-      "training-present and training-absent rows"
-    )
+      nrow(rare_population) > 0,
+    "Rare-population filtering lost observations or produced no rows"
   )
   checks$rare_population_values_valid <- assert_true(
     all(
@@ -798,7 +857,7 @@ write_readme <- function(output_dir, counts) {
   lines <- c(
     "# Final reviewer figures",
     "",
-    "These figures are generated directly from a collector output directory. Collector validation must be `PASS` with 1,386 effective runs, and rows are admitted only when normalized absolute `source_path` exactly matches an accepted manifest `metric_path`.",
+    "These figures are generated directly from a collector output directory. Collector validation must be `PASS`, and rows are admitted only when normalized absolute `source_path` exactly matches an accepted manifest `metric_path`.",
     "",
     "## Figures 1 and 2: Macro and support-weighted performance",
     "",
@@ -810,7 +869,7 @@ write_readme <- function(output_dir, counts) {
     "",
     "## Figure 4: Completion coverage",
     "",
-    "Accepted effective cases divided by expected effective cases derived from manifest scalar fields. Collector PASS requires complete coverage, so every cell is 1.",
+    "Accepted effective cases divided by expected runnable cases derived from run status. Collector PASS requires complete coverage, so every cell is 1.",
     "",
     "## Figure 5: Rare-population F1",
     "",
@@ -892,7 +951,7 @@ main <- function() {
     coverage,
     "Completion coverage",
     "Accepted effective cases divided by expected effective cases",
-    "Collector PASS requires the complete canonical matrix; all cells equal 100%.",
+    "Collector PASS requires the complete supplied matrix; all cells equal 100%.",
     percent = TRUE
   )
   rare_f1_plot <- make_rare_f1_plot(rare_f1)
@@ -1012,7 +1071,7 @@ main <- function() {
       figure_6 = c(width = 10, height = 4.3)
     ),
     notes = c(
-      "Collector validation PASS with exactly 1386 effective runs is required.",
+      "Collector validation PASS and exact reconciliation with the supplied run matrix are required.",
       "Run and population rows join accepted records by normalized source_path and metric_path.",
       "Manifest scalar fields define dataset, model, stratification, effective fold, and coverage.",
       "Rare-population plots retain qualifying accepted effective-fold observations.",

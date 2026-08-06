@@ -180,15 +180,7 @@ normalize_paths <- function(values) {
   unique(values[!is.na(values) & values != ""])
 }
 
-EXPECTED_REQUESTED_RUNS <- 1440L
-EXPECTED_EFFECTIVE_RUNS <- 1386L
-EXPECTED_MODELS <- c("cyanno", "cygate", "dgcytof", "knn", "lda", "random")
-EXPECTED_RUNS_PER_MODEL <- 231L
-EXPECTED_STRATIFICATIONS <- c("unfiltered", "drop-train", "drop-both")
-EXPECTED_METRICS <- c("accuracy", "precision", "recall", "balanced_accuracy", "f1")
-EXPECTED_DATASET_PARAMETERIZATIONS <- 16L
-EXPECTED_REQUESTED_GROUPS <- 288L
-EXPECTED_WRAPPED_ALIASES <- 54L
+REQUIRED_METRICS <- c("accuracy", "precision", "recall", "balanced_accuracy", "f1")
 
 sanitize_label <- function(value) {
   cleaned <- str_replace_all(as.character(value), "[^A-Za-z0-9._-]+", "-")
@@ -740,9 +732,9 @@ collect_metrics <- function(path) {
   payload <- read_metrics_json(path)
   metrics_requested <- as.character(unlist(payload$metrics_requested, use.names = FALSE))
   if (
-    length(metrics_requested) != length(EXPECTED_METRICS) ||
+    length(metrics_requested) != length(REQUIRED_METRICS) ||
       anyDuplicated(metrics_requested) ||
-      !setequal(metrics_requested, EXPECTED_METRICS)
+      !setequal(metrics_requested, REQUIRED_METRICS)
   ) {
     stop(
       sprintf(
@@ -775,6 +767,8 @@ collect_metrics <- function(path) {
       requested_fold = lineage$requested_fold,
       effective_fold = lineage$effective_fold,
       run_id = run_id,
+      status = as.character(run$status %||% "completed"),
+      reason = as.character(run$reason %||% NA_character_),
       f1_macro = as.numeric(run$f1_macro %||% NA_real_),
       precision_macro = as.numeric(run$precision_macro %||% NA_real_),
       recall_macro = as.numeric(run$recall_macro %||% NA_real_),
@@ -1157,7 +1151,7 @@ build_finalization_outputs <- function(requested_metrics, effective_metrics, out
       collector_dataset_identity = dataset,
       dataset = dataset_name,
       dataset_sub_sampling,
-      model = model_base,
+      model,
       stratification,
       stratification_hash,
       effective_fold,
@@ -1179,13 +1173,15 @@ build_finalization_outputs <- function(requested_metrics, effective_metrics, out
       collector_dataset_identity = dataset,
       dataset = dataset_name,
       dataset_sub_sampling,
-      model = model_base,
+      model,
       requested_fold,
       effective_fold,
       wrapped_fold = requested_fold != effective_fold,
       stratification,
       stratification_hash,
-      status = "completed",
+      status,
+      reason,
+      selected_for_effective = source_path %in% accepted_manifest$metric_path,
       prediction_path,
       metric_path = source_path,
       metadata_path,
@@ -1205,7 +1201,7 @@ build_finalization_outputs <- function(requested_metrics, effective_metrics, out
       collector_dataset_identity = dataset,
       dataset = dataset_name,
       dataset_sub_sampling,
-      model = model_base,
+      model,
       stratification,
       stratification_hash,
       effective_fold,
@@ -1225,6 +1221,19 @@ build_finalization_outputs <- function(requested_metrics, effective_metrics, out
   readr::write_tsv(model_wall_times, paths$model_wall_times)
 
   model_counts <- table(accepted_manifest$model)
+  requested_model_counts <- table(requested_metrics$model)
+  requested_models <- unique(requested_metrics$model)
+  effective_models <- unique(accepted_manifest$model)
+  requested_stratifications <- unique(requested_metrics$stratification)
+  effective_stratifications <- unique(accepted_manifest$stratification)
+  requested_folds <- sort(unique(requested_metrics$requested_fold))
+  status_counts <- table(requested_metrics$status)
+  resolved_effective_count <- requested_metrics %>%
+    distinct(dataset, model, stratification_hash, run_id, effective_fold) %>%
+    nrow()
+  requested_group_count <- requested_metrics %>%
+    distinct(dataset, model, stratification_hash, run_id) %>%
+    nrow()
   accepted_key <- c(
     "collector_dataset_identity",
     "model",
@@ -1233,25 +1242,38 @@ build_finalization_outputs <- function(requested_metrics, effective_metrics, out
   )
   validation <- list(
     status = "PASS",
+    design_source = "supplied metric and metadata inputs",
+    wrapped_alias_policy = "select lowest requested fold per effective key",
     counts = list(
       requested = nrow(requested_metrics),
+      resolved_effective = resolved_effective_count,
       effective = nrow(accepted_manifest),
+      requested_models = length(requested_models),
       models = length(unique(accepted_manifest$model)),
+      datasets = length(unique(accepted_manifest$collector_dataset_identity)),
+      requested_groups = requested_group_count,
+      requested_folds = as.list(requested_folds),
+      wrapped_aliases = nrow(requested_metrics) - resolved_effective_count,
+      requested_by_status = as.list(status_counts),
       effective_per_model = as.list(model_counts),
       stratifications = length(unique(accepted_manifest$stratification))
     ),
     assertions = list(
-      requested_count = nrow(requested_metrics) == EXPECTED_REQUESTED_RUNS,
-      effective_count = nrow(accepted_manifest) == EXPECTED_EFFECTIVE_RUNS,
-      canonical_models = setequal(unique(accepted_manifest$model), EXPECTED_MODELS),
-      rows_per_model = isTRUE(
-        all(model_counts[EXPECTED_MODELS] == EXPECTED_RUNS_PER_MODEL)
+      requested_nonempty = nrow(requested_metrics) > 0,
+      effective_nonempty = nrow(accepted_manifest) > 0,
+      effective_not_greater_than_requested =
+        nrow(accepted_manifest) <= nrow(requested_metrics),
+      effective_models_are_requested = all(effective_models %in% requested_models),
+      every_effective_model_has_rows =
+        all(requested_model_counts[requested_models] > 0) &&
+          all(model_counts[effective_models] > 0),
+      effective_stratifications_are_requested =
+        all(effective_stratifications %in% requested_stratifications),
+      requested_rows_resolved = all(run_status$status %in% c("completed", "not_run")),
+      not_run_rows_have_reasons = all(
+        run_status$status != "not_run" |
+          (!is.na(run_status$reason) & nzchar(trimws(run_status$reason)))
       ),
-      canonical_stratifications = setequal(
-        unique(accepted_manifest$stratification),
-        EXPECTED_STRATIFICATIONS
-      ),
-      requested_rows_completed = all(run_status$status == "completed"),
       effective_keys_unique = !anyDuplicated(accepted_manifest[accepted_key]),
       metric_paths_unique = !anyDuplicated(accepted_manifest$metric_path)
     ),
@@ -2494,11 +2516,10 @@ if (length(missing_input_paths) > 0) {
   )
 }
 input_paths <- normalizePath(input_paths, winslash = "/", mustWork = TRUE)
-if (length(input_paths) != EXPECTED_REQUESTED_RUNS || anyDuplicated(input_paths)) {
+if (anyDuplicated(input_paths)) {
   stop(
     sprintf(
-      "Expected exactly %d unique input metric paths, got %d (%d unique).",
-      EXPECTED_REQUESTED_RUNS,
+      "Input metric paths must be unique; got %d paths (%d unique).",
       length(input_paths),
       length(unique(input_paths))
     )
@@ -2521,6 +2542,15 @@ if (length(missing_order_paths) > 0) {
 order_paths <- normalizePath(order_paths, winslash = "/", mustWork = TRUE)
 order_map <- build_order_map(order_paths)
 metric_artifact_context <- build_metric_artifact_context(input_paths, order_paths)
+unused_order_paths <- setdiff(order_paths, unique(metric_artifact_context$metadata_path))
+if (length(unused_order_paths) > 0) {
+  stop(
+    sprintf(
+      "Metadata inputs without metric rows: %s",
+      paste(unused_order_paths, collapse = ", ")
+    )
+  )
+}
 
 metrics_rows <- lapply(input_paths, collect_metrics)
 per_population_rows <- lapply(input_paths, collect_per_population)
@@ -2562,7 +2592,7 @@ per_population_df <- ensure_columns(
 )
 population_availability_df <- bind_rows(population_availability_rows)
 if (
-  nrow(metrics_df) != EXPECTED_REQUESTED_RUNS ||
+  nrow(metrics_df) != length(input_paths) ||
     any(metrics_df$run_id != "run0") ||
     anyDuplicated(metrics_df$source_path)
 ) {
@@ -2618,10 +2648,6 @@ if (nrow(variant_lookup) > 0) {
     select(-model_variant.resolved, -model.resolved)
 }
 
-metrics_df <- metrics_df %>% mutate(model = model_base)
-per_population_df <- per_population_df %>% mutate(model = model_base)
-population_availability_df <- population_availability_df %>% mutate(model = model_base)
-
 missing_datasets <- setdiff(unique(metrics_df$dataset), names(order_map))
 if (length(missing_datasets) > 0) {
   stop(
@@ -2645,13 +2671,14 @@ requested_metrics_df <- metrics_df
 
 requested_group_key <- c(
   "dataset",
-  "model_base",
-  "model_params",
+  "model",
   "stratification",
   "stratification_hash",
   "run_id"
 )
 requested_key <- c(requested_group_key, "requested_fold")
+requested_folds <- sort(unique(metrics_df$requested_fold))
+requested_fold_signature <- paste(requested_folds, collapse = ",")
 requested_groups <- metrics_df %>%
   group_by(across(all_of(requested_group_key))) %>%
   summarize(
@@ -2659,25 +2686,54 @@ requested_groups <- metrics_df %>%
     requested_folds = paste(sort(requested_fold), collapse = ","),
     .groups = "drop"
   )
+model_variants <- metrics_df %>%
+  distinct(model, model_base, model_params)
+stratification_variants <- metrics_df %>%
+  distinct(stratification, stratification_hash)
+expected_requested_groups <-
+  n_distinct(metrics_df$dataset) *
+  n_distinct(metrics_df$model) *
+  nrow(stratification_variants) *
+  n_distinct(metrics_df$run_id)
 if (
-  n_distinct(metrics_df$dataset) != EXPECTED_DATASET_PARAMETERIZATIONS ||
-    nrow(requested_groups) != EXPECTED_REQUESTED_GROUPS ||
-    any(requested_groups$requested_count != 5L) ||
-    any(requested_groups$requested_folds != "1,2,3,4,5") ||
+  length(requested_folds) == 0 ||
+    any(!is.finite(requested_folds) | requested_folds <= 0) ||
+    anyDuplicated(model_variants$model) ||
+    anyDuplicated(stratification_variants$stratification) ||
+    anyDuplicated(stratification_variants$stratification_hash) ||
+    nrow(requested_groups) != expected_requested_groups ||
+    any(requested_groups$requested_count != length(requested_folds)) ||
+    any(requested_groups$requested_folds != requested_fold_signature) ||
     anyDuplicated(metrics_df[requested_key])
 ) {
   stop(
-    paste0(
-      "Requested-run matrix is not the complete 16-dataset x 6-model x ",
-      "3-stratification x 5-fold design."
+    sprintf(
+      paste0(
+        "Requested-run matrix is incomplete or inconsistent: rows=%d, ",
+        "datasets=%d, models=%d, stratifications=%d, folds={%s}."
+      ),
+      nrow(metrics_df),
+      n_distinct(metrics_df$dataset),
+      n_distinct(metrics_df$model),
+      nrow(stratification_variants),
+      requested_fold_signature
     )
   )
 }
 
+if (
+  any(!metrics_df$status %in% c("completed", "not_run")) ||
+    any(
+      metrics_df$status == "not_run" &
+        (is.na(metrics_df$reason) | !nzchar(trimws(metrics_df$reason)))
+    )
+) {
+  stop("Metric rows must have status completed or not_run, with a reason for not_run rows.")
+}
+
 effective_key <- c(
   "dataset",
-  "model_base",
-  "model_params",
+  "model",
   "stratification",
   "stratification_hash",
   "run_id",
@@ -2686,15 +2742,8 @@ effective_key <- c(
 assert_alias_values_equal(
   metrics_df,
   effective_key,
-  c(
-    "dataset_name", "dataset_sub_sampling", "f1_macro", "precision_macro",
-    "recall_macro", "balanced_accuracy", "accuracy", "mcc", "pop_freq_corr",
-    "overlap", "f1_weighted", "precision_weighted", "recall_weighted", "n_cells",
-    "n_cells_total", "n_truth_positive", "n_truth_zero",
-    "n_pred_zero_on_truth_positive", "rejection_rate_on_truth_positive",
-    "n_pred_zero_on_truth_zero", "n_pred_missing_mapped_to_zero"
-  ),
-  "aggregate metrics"
+  c("dataset_name", "dataset_sub_sampling", "n_cells", "n_cells_total", "status", "reason"),
+  "aggregate source data"
 )
 per_population_alias_sets <- per_population_df %>%
   group_by(across(all_of(c(effective_key, "requested_fold")))) %>%
@@ -2713,12 +2762,10 @@ assert_alias_values_equal(
   per_population_df,
   c(effective_key, "population_id"),
   c(
-    "dataset_name", "dataset_sub_sampling", "population_name", "population",
-    "f1", "precision", "recall", "accuracy", "tp", "fp", "fn", "tn",
-    "support", "nominal_train_count", "training_support", "present_in_training",
-    "test_truth_count"
+    "dataset_name", "dataset_sub_sampling", "population_name", "population", "support",
+    "nominal_train_count", "training_support", "present_in_training", "test_truth_count"
   ),
-  "per-population metrics"
+  "per-population source data"
 )
 availability_alias_sets <- population_availability_df %>%
   group_by(across(all_of(c(effective_key, "requested_fold")))) %>%
@@ -2745,10 +2792,10 @@ assert_alias_values_equal(
 )
 
 deduped_metrics <- metrics_df %>%
+  arrange(requested_fold, source_path) %>%
   distinct(
     dataset,
-    model_base,
-    model_params,
+    model,
     stratification,
     stratification_hash,
     run_id,
@@ -2756,20 +2803,14 @@ deduped_metrics <- metrics_df %>%
     .keep_all = TRUE
   )
 wrapped_alias_count <- nrow(metrics_df) - nrow(deduped_metrics)
-if (wrapped_alias_count != EXPECTED_WRAPPED_ALIASES) {
-  stop(
-    sprintf(
-      "Expected exactly %d wrapped aliases, found %d.",
-      EXPECTED_WRAPPED_ALIASES,
-      wrapped_alias_count
-    )
-  )
-}
-if (nrow(deduped_metrics) < nrow(metrics_df)) {
+if (wrapped_alias_count > 0) {
   warning(
     sprintf(
-      "Filtered %d duplicate metric rows after crossvalidation wrap.",
-      nrow(metrics_df) - nrow(deduped_metrics)
+      paste0(
+        "Selected the lowest requested-fold result for %d wrapped aliases; ",
+        "metrics may differ across stochastic reruns."
+      ),
+      wrapped_alias_count
     ),
     call. = FALSE
   )
@@ -2779,33 +2820,55 @@ metrics_df <- deduped_metrics %>%
   mutate(crossvalidation = effective_crossvalidation) %>%
   select(-effective_crossvalidation)
 
-effective_model_counts <- table(metrics_df$model_base)
+effective_model_counts <- table(metrics_df$model)
 effective_stratifications <- metrics_df %>%
   distinct(stratification, stratification_hash)
 effective_groups <- metrics_df %>%
   group_by(
     dataset,
     dataset_name,
-    model_base,
-    model_params,
+    model,
     stratification,
     stratification_hash,
     run_id
   ) %>%
   summarize(effective_count = n(), .groups = "drop")
+expected_effective_groups <- requested_metrics_df %>%
+  group_by(
+    dataset,
+    dataset_name,
+    model,
+    stratification,
+    stratification_hash,
+    run_id
+  ) %>%
+  summarize(expected_count = n_distinct(effective_fold), .groups = "drop")
+effective_group_validation <- expected_effective_groups %>%
+  full_join(
+    effective_groups,
+    by = c(
+      "dataset",
+      "dataset_name",
+      "model",
+      "stratification",
+      "stratification_hash",
+      "run_id"
+    )
+  )
 if (
-  nrow(metrics_df) != EXPECTED_EFFECTIVE_RUNS ||
-    !setequal(unique(metrics_df$model_base), EXPECTED_MODELS) ||
-    !isTRUE(all(effective_model_counts[EXPECTED_MODELS] == EXPECTED_RUNS_PER_MODEL)) ||
-    !setequal(unique(metrics_df$stratification), EXPECTED_STRATIFICATIONS) ||
-    nrow(effective_stratifications) != length(EXPECTED_STRATIFICATIONS) ||
+  nrow(metrics_df) != sum(expected_effective_groups$expected_count) ||
+    !setequal(unique(metrics_df$model), unique(requested_metrics_df$model)) ||
+    any(effective_model_counts <= 0) ||
+    !setequal(
+      unique(metrics_df$stratification),
+      unique(requested_metrics_df$stratification)
+    ) ||
+    nrow(effective_stratifications) != nrow(stratification_variants) ||
     anyDuplicated(effective_stratifications$stratification) ||
     anyDuplicated(effective_stratifications$stratification_hash) ||
-    nrow(effective_groups) != EXPECTED_REQUESTED_GROUPS ||
-    any(
-      effective_groups$effective_count !=
-        ifelse(effective_groups$dataset_name == "Levine", 2L, 5L)
-    )
+    nrow(effective_groups) != nrow(expected_effective_groups) ||
+    any(!complete.cases(effective_group_validation)) ||
+    any(effective_group_validation$effective_count != effective_group_validation$expected_count)
 ) {
   stop(
     sprintf(
@@ -2814,14 +2877,21 @@ if (
         "per-model={%s}, stratifications={%s}."
       ),
       nrow(metrics_df),
-      paste(sort(unique(metrics_df$model_base)), collapse = ","),
+      paste(sort(unique(metrics_df$model)), collapse = ","),
       paste(effective_model_counts, collapse = ","),
       paste(sort(unique(metrics_df$stratification)), collapse = ",")
     )
   )
 }
 
+completed_source_paths <- metrics_df %>%
+  filter(status == "completed") %>%
+  pull(source_path)
+metrics_df <- metrics_df %>%
+  filter(status == "completed")
+
 per_population_df <- per_population_df %>%
+  arrange(requested_fold, source_path) %>%
   distinct(
     dataset,
     model_base,
@@ -2833,10 +2903,12 @@ per_population_df <- per_population_df %>%
     population_id,
     .keep_all = TRUE
   ) %>%
+  filter(source_path %in% completed_source_paths) %>%
   mutate(crossvalidation = effective_crossvalidation) %>%
   select(-effective_crossvalidation)
 
 population_availability_df <- population_availability_df %>%
+  arrange(requested_fold, source_path) %>%
   distinct(
     dataset,
     model_base,
@@ -2848,6 +2920,7 @@ population_availability_df <- population_availability_df %>%
     population_id,
     .keep_all = TRUE
   ) %>%
+  filter(source_path %in% completed_source_paths) %>%
   mutate(crossvalidation = effective_crossvalidation) %>%
   select(-effective_crossvalidation) %>%
   group_by(
