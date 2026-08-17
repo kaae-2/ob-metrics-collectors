@@ -768,9 +768,7 @@ collect_metrics <- function(path) {
       f1_macro = as.numeric(run$f1_macro %||% NA_real_),
       precision_macro = as.numeric(run$precision_macro %||% NA_real_),
       recall_macro = as.numeric(run$recall_macro %||% NA_real_),
-      balanced_accuracy = as.numeric(
-        run$balanced_accuracy %||% run$recall_macro %||% NA_real_
-      ),
+      balanced_accuracy = as.numeric(run$balanced_accuracy %||% NA_real_),
       accuracy = as.numeric(run$accuracy %||% NA_real_),
       mcc = as.numeric(run$mcc %||% NA_real_),
       pop_freq_corr = as.numeric(run$pop_freq_corr %||% NA_real_),
@@ -826,6 +824,8 @@ collect_per_population <- function(path) {
       f1 = numeric(),
       precision = numeric(),
       recall = numeric(),
+      specificity = numeric(),
+      balanced_accuracy_ovr = numeric(),
       accuracy = numeric(),
       tp = numeric(),
       fp = numeric(),
@@ -878,6 +878,10 @@ collect_per_population <- function(path) {
         f1 = f1,
         precision = as.numeric(entry$precision %||% NA_real_),
         recall = as.numeric(entry$recall %||% NA_real_),
+        specificity = as.numeric(entry$specificity %||% NA_real_),
+        balanced_accuracy_ovr = as.numeric(
+          entry$balanced_accuracy %||% NA_real_
+        ),
         accuracy = as.numeric(entry$accuracy %||% NA_real_),
         tp = as.numeric(entry$tp %||% NA_real_),
         fp = as.numeric(entry$fp %||% NA_real_),
@@ -2348,6 +2352,8 @@ per_population_df <- ensure_columns(
     f1 = NA_real_,
     precision = NA_real_,
     recall = NA_real_,
+    specificity = NA_real_,
+    balanced_accuracy_ovr = NA_real_,
     accuracy = NA_real_,
     tp = NA_real_,
     fp = NA_real_,
@@ -2814,22 +2820,37 @@ per_population_df <- per_population_df %>%
     )
   )
 
+metric_tolerance <- 1e-12
 truth_present_population <- per_population_df %>%
-  filter(!is.na(test_truth_count), test_truth_count > 0)
+  filter(!is.na(test_truth_count), test_truth_count > 0) %>%
+  mutate(
+    recomputed_recall = ifelse((tp + fn) > 0, tp / (tp + fn), NA_real_),
+    recomputed_specificity = ifelse((tn + fp) > 0, tn / (tn + fp), NA_real_),
+    recomputed_balanced_accuracy_ovr =
+      (recomputed_recall + recomputed_specificity) / 2
+  )
 invalid_truth_present_population <- truth_present_population %>%
   filter(
     !is.finite(f1) |
       !is.finite(precision) |
       !is.finite(recall) |
+      !is.finite(specificity) |
+      !is.finite(balanced_accuracy_ovr) |
       !is.finite(accuracy) |
-      !is.finite(scaling_rate)
+      !is.finite(scaling_rate) |
+      !is.finite(recomputed_recall) |
+      !is.finite(recomputed_specificity) |
+      !is.finite(recomputed_balanced_accuracy_ovr) |
+      abs(recall - recomputed_recall) > metric_tolerance |
+      abs(specificity - recomputed_specificity) > metric_tolerance |
+      abs(balanced_accuracy_ovr - recomputed_balanced_accuracy_ovr) > metric_tolerance
   )
 if (nrow(invalid_truth_present_population) > 0) {
   example <- invalid_truth_present_population[1, ]
   stop(
     sprintf(
       paste0(
-        "Truth-present population has a non-finite metric: ",
+        "Truth-present population has a non-finite or inconsistent metric: ",
         "dataset=%s model=%s stratification=%s crossvalidation=%s population=%s"
       ),
       example$dataset,
@@ -2855,6 +2876,7 @@ recomputed_macros <- truth_present_population %>%
     recomputed_f1_macro = mean(f1),
     recomputed_precision_macro = mean(precision),
     recomputed_recall_macro = mean(recall),
+    recomputed_balanced_accuracy = mean(balanced_accuracy_ovr),
     .groups = "drop"
   )
 macro_reconciliation <- metrics_df %>%
@@ -2866,7 +2888,6 @@ macro_reconciliation <- metrics_df %>%
     balanced_accuracy
   ) %>%
   left_join(recomputed_macros, by = macro_key)
-macro_tolerance <- 1e-12
 invalid_macro_rows <- macro_reconciliation %>%
   filter(
     !is.finite(f1_macro) |
@@ -2876,10 +2897,11 @@ invalid_macro_rows <- macro_reconciliation %>%
       !is.finite(recomputed_f1_macro) |
       !is.finite(recomputed_precision_macro) |
       !is.finite(recomputed_recall_macro) |
-      abs(f1_macro - recomputed_f1_macro) > macro_tolerance |
-      abs(precision_macro - recomputed_precision_macro) > macro_tolerance |
-      abs(recall_macro - recomputed_recall_macro) > macro_tolerance |
-      abs(balanced_accuracy - recomputed_recall_macro) > macro_tolerance
+      !is.finite(recomputed_balanced_accuracy) |
+      abs(f1_macro - recomputed_f1_macro) > metric_tolerance |
+      abs(precision_macro - recomputed_precision_macro) > metric_tolerance |
+      abs(recall_macro - recomputed_recall_macro) > metric_tolerance |
+      abs(balanced_accuracy - recomputed_balanced_accuracy) > metric_tolerance
   )
 if (nrow(macro_reconciliation) != nrow(metrics_df) || nrow(invalid_macro_rows) > 0) {
   stop(
@@ -2924,6 +2946,8 @@ per_population_table <- per_population_df %>%
     f1,
     precision,
     recall,
+    specificity,
+    balanced_accuracy_ovr,
     accuracy,
     support,
     nominal_train_count,
@@ -3010,6 +3034,10 @@ per_population_summary <- per_population_df %>%
     mean_precision = mean(precision, na.rm = TRUE),
     median_recall = median(recall, na.rm = TRUE),
     mean_recall = mean(recall, na.rm = TRUE),
+    median_specificity = median(specificity, na.rm = TRUE),
+    mean_specificity = mean(specificity, na.rm = TRUE),
+    median_balanced_accuracy_ovr = median(balanced_accuracy_ovr, na.rm = TRUE),
+    mean_balanced_accuracy_ovr = mean(balanced_accuracy_ovr, na.rm = TRUE),
     median_support = median(support, na.rm = TRUE),
     n_runs = n(),
     .groups = "drop"
@@ -3029,6 +3057,7 @@ per_population_stability <- per_population_df %>%
     f1_sd = sd(f1, na.rm = TRUE),
     precision_sd = sd(precision, na.rm = TRUE),
     recall_sd = sd(recall, na.rm = TRUE),
+    balanced_accuracy_ovr_sd = sd(balanced_accuracy_ovr, na.rm = TRUE),
     n_runs = n(),
     .groups = "drop"
   )

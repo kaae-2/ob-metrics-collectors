@@ -27,7 +27,8 @@ stratification_display_map <- c(
 metric_display_map <- c(
   "precision_macro" = "Macro precision",
   "f1_macro" = "Macro F1",
-  "recall_macro" = "Macro recall = balanced accuracy*",
+  "recall_macro" = "Macro recall",
+  "balanced_accuracy" = "Macro one-vs-rest balanced accuracy",
   "precision_weighted" = "Support-weighted precision",
   "f1_weighted" = "Support-weighted F1",
   "recall_weighted" = "Support-weighted recall = overall accuracy"
@@ -384,7 +385,7 @@ prepare_data <- function(input_root) {
   run_metrics <- read_tsv_required(
     paths$run_metrics,
     c(
-      "source_path", "run_id", names(metric_display_map), "balanced_accuracy", "accuracy",
+      "source_path", "run_id", names(metric_display_map), "accuracy",
       "n_truth_positive", "n_pred_zero_on_truth_positive",
       "rejection_rate_on_truth_positive"
     )
@@ -396,7 +397,7 @@ prepare_data <- function(input_root) {
       across(
         all_of(
           c(
-            names(metric_display_map), "balanced_accuracy", "accuracy",
+            names(metric_display_map), "accuracy",
             "n_truth_positive", "n_pred_zero_on_truth_positive",
             "rejection_rate_on_truth_positive"
           )
@@ -422,7 +423,6 @@ prepare_data <- function(input_root) {
         unlist(accepted_runs[plotted_run_columns], use.names = FALSE) >= 0 &
           unlist(accepted_runs[plotted_run_columns], use.names = FALSE) <= 1
       ) &&
-      all(abs(accepted_runs$recall_macro - accepted_runs$balanced_accuracy) < 1e-12) &&
       all(abs(accepted_runs$recall_weighted - accepted_runs$accuracy) < 1e-12) &&
       all(
         is.finite(accepted_runs$n_truth_positive) & accepted_runs$n_truth_positive > 0 &
@@ -862,7 +862,7 @@ write_readme <- function(output_dir, counts) {
     "",
     "## Figures 1 and 2: Macro and support-weighted performance",
     "",
-    "Arithmetic means across accepted effective folds for precision, F1, and recall. Macro recall equals balanced accuracy; support-weighted recall equals overall accuracy.",
+    "Arithmetic means across accepted effective folds for precision, F1, recall, and one-vs-rest balanced accuracy. Support-weighted recall equals overall accuracy.",
     "",
     "## Figure 3: Model-rejection event rate",
     "",
@@ -907,7 +907,10 @@ main <- function() {
   prepared <- prepare_data(args$input_root)
   base <- prepared$figure_base
   rare_population <- prepared$rare_population
-  macro <- performance_source(base, c("precision_macro", "f1_macro", "recall_macro"))
+  macro <- performance_source(
+    base,
+    c("precision_macro", "f1_macro", "recall_macro", "balanced_accuracy")
+  )
   weighted <- performance_source(base, c("precision_weighted", "f1_weighted", "recall_weighted"))
   rejection <- rejection_source(base)
   coverage <- coverage_source(base)
@@ -933,7 +936,7 @@ main <- function() {
     macro,
     "Macro performance across accepted benchmark groups",
     "Equal effective-fold weight within each cell; stratifications remain separate",
-    "* Macro recall equals balanced accuracy. Cell text: mean and completed/expected effective folds."
+    "Balanced accuracy averages one-vs-rest sensitivity and specificity. Cell text: mean and completed/expected effective folds."
   )
   weighted_plot <- make_tile_plot(
     weighted,
