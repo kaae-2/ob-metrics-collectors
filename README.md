@@ -21,7 +21,12 @@ The extended plot suite is generated from collector outputs only
 `run_metrics.tsv`, `dataset_metadata.json`). The macro and run-level TSVs report
 precision and recall alongside F1 (`precision_macro`, `recall_macro`,
 `precision_weighted`, `recall_weighted`) while preserving the historical F1 file
-names for compatibility. Run-level timing uses measured model wall time and
+names for compatibility. `f1_macro` remains the historical score conditional on
+known truth cells, `f1_macro_known_conditional` names that behavior explicitly,
+and `f1_macro_known_open_set` is the primary reviewer F1: ungated truth cells can
+contribute false positives, but only known biological populations are averaged.
+`ungated_leakage_rate` reports the fraction of ungated truth cells assigned to a
+known population. Run-level timing uses measured model wall time and
 reports eligible training cells, eligible test cells, total processed cells, and
 derived cell throughput; unsupported empty runtime and correlation fields are
 not emitted. Dataset display names default to the metadata

@@ -766,6 +766,12 @@ collect_metrics <- function(path) {
       status = as.character(run$status %||% "completed"),
       reason = as.character(run$reason %||% NA_character_),
       f1_macro = as.numeric(run$f1_macro %||% NA_real_),
+      f1_macro_known_conditional = as.numeric(
+        run$f1_macro_known_conditional %||% run$f1_macro %||% NA_real_
+      ),
+      f1_macro_known_open_set = as.numeric(
+        run$f1_macro_known_open_set %||% NA_real_
+      ),
       precision_macro = as.numeric(run$precision_macro %||% NA_real_),
       recall_macro = as.numeric(run$recall_macro %||% NA_real_),
       balanced_accuracy = as.numeric(run$balanced_accuracy %||% NA_real_),
@@ -792,6 +798,12 @@ collect_metrics <- function(path) {
       ),
       n_pred_zero_on_truth_zero = as.numeric(
         run$n_pred_zero_on_truth_zero %||% NA_real_
+      ),
+      n_pred_positive_on_truth_zero = as.numeric(
+        run$n_pred_positive_on_truth_zero %||% NA_real_
+      ),
+      ungated_leakage_rate = as.numeric(
+        run$ungated_leakage_rate %||% NA_real_
       ),
       n_pred_missing_mapped_to_zero = as.numeric(
         run$n_pred_missing_mapped_to_zero %||% NA_real_
@@ -2332,6 +2344,8 @@ metrics_df <- ensure_columns(
   metrics_df,
   list(
     n_cells_total = NA_real_,
+    f1_macro_known_conditional = NA_real_,
+    f1_macro_known_open_set = NA_real_,
     precision_macro = NA_real_,
     recall_macro = NA_real_,
     accuracy = NA_real_,
@@ -2339,7 +2353,9 @@ metrics_df <- ensure_columns(
     pop_freq_corr = NA_real_,
     overlap = NA_real_,
     runtime_seconds = NA_real_,
-    scalability_seconds_per_item = NA_real_
+    scalability_seconds_per_item = NA_real_,
+    n_pred_positive_on_truth_zero = NA_real_,
+    ungated_leakage_rate = NA_real_
   )
 )
 per_population_df <- bind_rows(per_population_rows)
@@ -2802,6 +2818,8 @@ per_population_df <- per_population_df %>%
         n_cells_total,
         n_cells,
         f1_macro,
+        f1_macro_known_conditional,
+        f1_macro_known_open_set,
         precision_macro,
         recall_macro,
         balanced_accuracy,
@@ -2912,6 +2930,38 @@ if (nrow(macro_reconciliation) != nrow(metrics_df) || nrow(invalid_macro_rows) >
   )
 }
 
+invalid_open_set_rows <- metrics_df %>%
+  filter(
+    !is.finite(f1_macro_known_conditional) |
+      !is.finite(f1_macro_known_open_set) |
+      abs(f1_macro_known_conditional - f1_macro) > metric_tolerance |
+      f1_macro_known_open_set < 0 |
+      f1_macro_known_open_set > 1 |
+      f1_macro_known_open_set > f1_macro_known_conditional + metric_tolerance |
+      !is.finite(n_truth_zero) |
+      n_truth_zero < 0 |
+      !is.finite(n_pred_positive_on_truth_zero) |
+      n_pred_positive_on_truth_zero < 0 |
+      n_pred_positive_on_truth_zero > n_truth_zero |
+      ifelse(
+        n_truth_zero > 0,
+        !is.finite(ungated_leakage_rate) |
+          abs(
+            ungated_leakage_rate -
+              n_pred_positive_on_truth_zero / n_truth_zero
+          ) > metric_tolerance,
+        !is.na(ungated_leakage_rate)
+      )
+  )
+if (nrow(invalid_open_set_rows) > 0) {
+  stop(
+    paste0(
+      "Open-set F1 or ungated leakage metrics are missing, out of range, ",
+      "or internally inconsistent."
+    )
+  )
+}
+
 macro_table <- metrics_df %>%
   select(
     dataset,
@@ -2922,6 +2972,8 @@ macro_table <- metrics_df %>%
     run_id,
     n_cells_total,
     f1_macro,
+    f1_macro_known_conditional,
+    f1_macro_known_open_set,
     precision_macro,
     recall_macro,
     balanced_accuracy,
@@ -3003,8 +3055,12 @@ run_metrics_table <- metrics_df %>%
     n_pred_zero_on_truth_positive,
     rejection_rate_on_truth_positive,
     n_pred_zero_on_truth_zero,
+    n_pred_positive_on_truth_zero,
+    ungated_leakage_rate,
     n_pred_missing_mapped_to_zero,
     f1_macro,
+    f1_macro_known_conditional,
+    f1_macro_known_open_set,
     precision_macro,
     recall_macro,
     balanced_accuracy,
@@ -3166,6 +3222,22 @@ macro_summary <- metrics_df %>%
   summarize(
     median_f1_macro = median(f1_macro, na.rm = TRUE),
     mean_f1_macro = mean(f1_macro, na.rm = TRUE),
+    median_f1_macro_known_conditional = median(
+      f1_macro_known_conditional,
+      na.rm = TRUE
+    ),
+    mean_f1_macro_known_conditional = mean(
+      f1_macro_known_conditional,
+      na.rm = TRUE
+    ),
+    median_f1_macro_known_open_set = median(
+      f1_macro_known_open_set,
+      na.rm = TRUE
+    ),
+    mean_f1_macro_known_open_set = mean(
+      f1_macro_known_open_set,
+      na.rm = TRUE
+    ),
     median_precision_macro = median(precision_macro, na.rm = TRUE),
     mean_precision_macro = mean(precision_macro, na.rm = TRUE),
     median_recall_macro = median(recall_macro, na.rm = TRUE),

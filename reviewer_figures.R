@@ -26,7 +26,7 @@ stratification_display_map <- c(
 
 metric_display_map <- c(
   "precision_macro" = "Macro precision",
-  "f1_macro" = "Macro F1",
+  "f1_macro_known_open_set" = "Known macro F1 (open set)",
   "recall_macro" = "Macro recall",
   "balanced_accuracy" = "Macro one-vs-rest balanced accuracy",
   "precision_weighted" = "Support-weighted precision",
@@ -386,8 +386,9 @@ prepare_data <- function(input_root) {
     paths$run_metrics,
     c(
       "source_path", "run_id", names(metric_display_map), "accuracy",
-      "n_truth_positive", "n_pred_zero_on_truth_positive",
-      "rejection_rate_on_truth_positive"
+      "n_truth_positive", "n_truth_zero", "n_pred_zero_on_truth_positive",
+      "n_pred_positive_on_truth_zero", "rejection_rate_on_truth_positive",
+      "ungated_leakage_rate"
     )
   ) %>%
     transmute(
@@ -398,8 +399,9 @@ prepare_data <- function(input_root) {
         all_of(
           c(
             names(metric_display_map), "accuracy",
-            "n_truth_positive", "n_pred_zero_on_truth_positive",
-            "rejection_rate_on_truth_positive"
+            "n_truth_positive", "n_truth_zero", "n_pred_zero_on_truth_positive",
+            "n_pred_positive_on_truth_zero", "rejection_rate_on_truth_positive",
+            "ungated_leakage_rate"
           )
         ),
         as.numeric
@@ -435,6 +437,24 @@ prepare_data <- function(input_root) {
           accepted_runs$rejection_rate_on_truth_positive -
             accepted_runs$n_pred_zero_on_truth_positive / accepted_runs$n_truth_positive
         ) < 1e-15
+      ) &&
+      all(
+        is.finite(accepted_runs$n_truth_zero) & accepted_runs$n_truth_zero >= 0 &
+          is.finite(accepted_runs$n_pred_positive_on_truth_zero) &
+          accepted_runs$n_pred_positive_on_truth_zero >= 0 &
+          accepted_runs$n_pred_positive_on_truth_zero <= accepted_runs$n_truth_zero
+      ) &&
+      all(
+        ifelse(
+          accepted_runs$n_truth_zero > 0,
+          is.finite(accepted_runs$ungated_leakage_rate) &
+            abs(
+              accepted_runs$ungated_leakage_rate -
+                accepted_runs$n_pred_positive_on_truth_zero /
+                  accepted_runs$n_truth_zero
+            ) < 1e-15,
+          is.na(accepted_runs$ungated_leakage_rate)
+        )
       ),
     "Accepted run metrics are missing, non-finite, out of range, or internally inconsistent"
   )
@@ -862,7 +882,7 @@ write_readme <- function(output_dir, counts) {
     "",
     "## Figures 1 and 2: Macro and support-weighted performance",
     "",
-    "Arithmetic means across accepted effective folds for precision, F1, recall, and one-vs-rest balanced accuracy. Support-weighted recall equals overall accuracy.",
+    "Arithmetic means across accepted effective folds for precision, known-population open-set F1, recall, and one-vs-rest balanced accuracy. Open-set F1 retains ungated truth cells as false-positive opportunities while averaging only known biological populations. Support-weighted recall equals overall accuracy.",
     "",
     "## Figure 3: Model-rejection event rate",
     "",
@@ -909,7 +929,10 @@ main <- function() {
   rare_population <- prepared$rare_population
   macro <- performance_source(
     base,
-    c("precision_macro", "f1_macro", "recall_macro", "balanced_accuracy")
+    c(
+      "precision_macro", "f1_macro_known_open_set", "recall_macro",
+      "balanced_accuracy"
+    )
   )
   weighted <- performance_source(base, c("precision_weighted", "f1_weighted", "recall_weighted"))
   rejection <- rejection_source(base)
